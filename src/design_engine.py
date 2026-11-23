@@ -34,6 +34,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 from src.miner import PROJECT_ROOT, probe_video_stream
 from src.rag_engine import query_rag
 from src.resource_guard import onnx_threads
+from src.schemas import UNIVERSAL_SAFE_BOX_9_16
 from src.speaker_guard import detect_faces_ultraface
 
 BUNDLED_FONT_PATH = PROJECT_ROOT / "assets" / "fonts" / "Montserrat-Black.ttf"
@@ -41,8 +42,7 @@ REMBG_HOME = PROJECT_ROOT / "models" / "rembg"
 ALLOWED_MATTING_MODEL = "birefnet-general-lite"
 FORBIDDEN_MATTING_MODELS = frozenset({"bria-rmbg", "bria", "sam", "matanyone"})
 
-# Universal 4-Network Safe Box on 1080x1920 (survives IG 3:4, TikTok 1:1, YT Home 4:5, FB Reels UI)
-UNIVERSAL_SAFE_BOX_9_16 = (90, 420, 990, 1250)
+# Re-exported Single Source of Truth Safe Box [48..888, 420..1248] (survives IG 3:4, TikTok 1:1, YT Shorts right buttons, FB UI)
 IG_GRID_3_4_BOX = (0, 240, 1080, 1680)
 TIKTOK_GRID_1_1_BOX = (0, 420, 1080, 1500)
 FB_UI_SAFE_BOX = (65, 269, 1015, 1248)
@@ -170,7 +170,8 @@ def select_peak_cover_frame_from_dir(
 
     candidates: list[dict[str, Any]] = []
     for idx, fp in enumerate(frame_paths):
-        img = Image.open(fp).convert("RGB")
+        with Image.open(fp) as _im:
+            img = _im.convert("RGB")
         sharp = _laplacian_sharpness(img)
         luma_mean = float(np.asarray(img.convert("L"), dtype=np.float32).mean())
         if luma_mean < 16.0:
@@ -202,7 +203,8 @@ def select_peak_cover_frame_from_dir(
         c["total_score"] = round(0.45 * (c["sharpness"] / max_sharp) + 0.35 * c["face_score"] + 0.20 * c["rms_norm"], 4)
 
     best_c = max(candidates, key=lambda c: c["total_score"])
-    best_img = Image.open(best_c["path"]).convert("RGB")
+    with Image.open(best_c["path"]) as _im:
+        best_img = _im.convert("RGB")
     best_img.save(out_clean_jpg, format="JPEG", quality=94, subsampling=0)
     return {
         "cover_timestamp_ms": round(float(best_c["ts"]) * 1000.0),
@@ -412,7 +414,8 @@ def select_peak_cover_frame(
             fp = tmp_dir / f"cand_{idx:02d}.png"
             try:
                 _extract_frame_at_sec(video_path, ts, fp)
-                img = Image.open(fp).convert("RGB")
+                with Image.open(fp) as _im:
+                    img = _im.convert("RGB")
             except Exception:
                 continue
 
@@ -461,7 +464,8 @@ def select_peak_cover_frame(
             c["total_score"] = round(0.45 * sharp_norm + 0.35 * c["face_score"] + 0.20 * c["rms_norm"], 4)
 
         best_c = max(candidates, key=lambda c: c["total_score"])
-        best_img = Image.open(best_c["path"]).convert("RGB")
+        with Image.open(best_c["path"]) as _im:
+            best_img = _im.convert("RGB")
         best_img.save(out_clean_jpg, format="JPEG", quality=94, subsampling=0)
 
     return {
@@ -857,7 +861,8 @@ def _render_html_to_image(html_doc: str, width: int, height: int) -> tuple[Image
             ]
             subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=25)
             if out_png.is_file() and out_png.stat().st_size > 0:
-                return Image.open(out_png).convert("RGB")
+                with Image.open(out_png) as _im:
+                    return _im.convert("RGB")
             return None
 
         img = _capture(width, height)
@@ -918,7 +923,8 @@ def _load_source_image(
     """Load an image directly or run Layer-1 peak frame selection on a video file."""
     ext = video_or_img.suffix.lower()
     if ext in {".jpg", ".jpeg", ".png", ".webp"}:
-        img = Image.open(video_or_img).convert("RGB")
+        with Image.open(video_or_img) as _im:
+            img = _im.convert("RGB")
         if out_clean_jpg is not None and out_clean_jpg.resolve() != video_or_img.resolve():
             out_clean_jpg.parent.mkdir(parents=True, exist_ok=True)
             img.save(out_clean_jpg, format="JPEG", quality=94, subsampling=0)
@@ -939,7 +945,9 @@ def _load_source_image(
         }
     clean_target = out_clean_jpg or video_or_img.with_name(f"{video_or_img.stem}_cover_clean.jpg")
     meta = select_peak_cover_frame(video_or_img, clean_target, webcam_box_px=webcam_box_px)
-    return Image.open(clean_target).convert("RGB"), meta
+    with Image.open(clean_target) as _im:
+        clean_img = _im.convert("RGB")
+    return clean_img, meta
 
 
 def render_editorial_cover_9_16(
@@ -1036,11 +1044,11 @@ html, body {{
   mix-blend-mode: overlay;
   pointer-events: none;
 }}
-/* Anchored cleanly on webcam/gameplay seam (y ~ 670..860), 100% inside Universal Safe Box [90..990, 420..1250] */
+/* Anchored cleanly on webcam/gameplay seam (y ~ 670..860), strictly inside Universal Safe Box [48..888, 420..1248] */
 .headline-wrap {{
   position: absolute;
-  left: 96px;
-  width: 888px;
+  left: {UNIVERSAL_SAFE_BOX_9_16[0]}px;
+  width: {UNIVERSAL_SAFE_BOX_9_16[2] - UNIVERSAL_SAFE_BOX_9_16[0]}px;
   top: 668px;
   display: flex;
   flex-direction: column;

@@ -52,7 +52,8 @@ jobs:
             "onnxruntime==1.32.0" \
             "scenedetect>=0.6.7" \
             "opencv-python-headless>=4.11.0" \
-            "google-genai>=3.6.1" \
+            "google-genai>=2.30.0,<3.0.0" \
+            "pydantic-ai-slim[google,groq]>=2.71.0" \
             "openai>=3.57.0" \
             "pytest>=8.3.0" \
             "ruff>=0.17.0" \
@@ -61,17 +62,8 @@ jobs:
       - name: Ruff lint check
         run: .venv/bin/ruff check src/ evals/ tests/ scripts/
 
-      - name: ty static type check (v3.5 ratchet modules)
-        run: |
-          .venv/bin/ty check \
-            src/schemas.py \
-            src/callout.py \
-            src/renderer.py \
-            src/curator.py \
-            src/scene_researcher.py \
-            src/db.py \
-            src/miner.py \
-            src/cli.py
+      - name: ty static type check (global src/)
+        run: .venv/bin/ty check src/
 
       - name: Pytest unit test suite
         run: .venv/bin/pytest tests/ -v

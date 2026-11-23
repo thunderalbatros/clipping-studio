@@ -6,6 +6,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+# Single Source of Truth for 9:16 (1080x1920) Universal Safe Box across DesignEngine, Callout, Renderer & MediaCheck.
+# Guarantees zero overlap with right-side TikTok/Shorts/Reels UI buttons (x<=888 / 18% margin) and 4-network crops.
+UNIVERSAL_SAFE_BOX_9_16: tuple[int, int, int, int] = (48, 420, 888, 1248)
+
 SceneType = Literal[
     "active_gameplay",
     "cutscene",

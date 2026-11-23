@@ -29,8 +29,10 @@ from src.miner import (
     auto_profile_creator,
     detect_platform,
     enforce_runs_quota,
+    measure_runs_usage_mb,
     mine_vod_slices,
     probe_kick_channel,
+    validate_run_id,
 )
 from src.renderer import render_ab_hook_variant, render_master_clip
 from src.resource_guard import heavy_local_allowed
@@ -182,7 +184,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     init_db()
     t0 = time.perf_counter()
     run_id = args.run_id or datetime.now(UTC).strftime("run_%Y%m%d_%H%M%S")
-    run_dir = RUNS_DIR / run_id
+    run_dir = validate_run_id(run_id, RUNS_DIR)
     state_path = run_dir / "state.json"
 
     if args.probe_kick:
@@ -248,7 +250,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_curate(args: argparse.Namespace) -> int:
     init_db()
-    run_dir = RUNS_DIR / args.run_id
+    run_dir = validate_run_id(args.run_id, RUNS_DIR)
     if args.retranscribe:
         transcribe_run(run_dir, audio_policy=args.audio_policy)
     state = curate_run(
@@ -446,6 +448,7 @@ def cmd_analytics(args: argparse.Namespace) -> int:
 
     init_db()
     if args.analytics_cmd == "log":
+        validate_run_id(args.run_id, RUNS_DIR)
         rec = record_publish_metrics(
             run_id=args.run_id,
             clip_id=args.clip_id,
@@ -564,7 +567,7 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     _ensure_media_path()
     load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=True)
     allowed, reason, snap = heavy_local_allowed()
-    runs_mb = enforce_runs_quota(RUNS_DIR)
+    runs_mb = measure_runs_usage_mb(RUNS_DIR)
     db_info = inspect_db_summary()
     daily_usd = get_daily_llm_spend_usd()
     daily_cap = float(os.getenv("LLM_DAILY_BUDGET_USD", "2.50") or 2.50)

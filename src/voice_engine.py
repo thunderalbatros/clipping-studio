@@ -121,9 +121,11 @@ def synthesize_commercial_tts(
     out_wav.parent.mkdir(parents=True, exist_ok=True)
 
     if model_name == "kokoro-82m":
+        import importlib
+
         try:
-            import kokoro_onnx  # type: ignore[import-not-found]
-            import soundfile as sf  # type: ignore[import-not-found]
+            kokoro_onnx: Any = importlib.import_module("kokoro_onnx")
+            sf: Any = importlib.import_module("soundfile")
         except ImportError as exc:
             raise RuntimeError(
                 "kokoro-onnx is not installed in .venv. Install optional commercial TTS via "

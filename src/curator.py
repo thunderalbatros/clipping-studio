@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.db import upsert_slice, upsert_transcript_fts
-from src.llm_router import build_cached_system_instruction, generate_structured
+from src.llm_router import build_cached_system_instruction, generate_structured, wrap_untrusted_source_data
 from src.miner import CHANNEL_PROFILE_PATH, PROJECT_ROOT, STREAMERS_PATH
 from src.rag_engine import build_curator_rag_context
 from src.schemas import (
@@ -236,7 +236,8 @@ def _extract_zoom_strip_1fps(video_path: Path, start_sec: float, duration_sec: f
                 check=False,
             )
             if fp.exists():
-                tile = Image.open(fp).convert("RGB")
+                with Image.open(fp) as _im:
+                    tile = _im.convert("RGB")
                 gx, gy = (idx % 4) * tile_w, (idx // 4) * tile_h
                 sheet.paste(tile, (gx, gy))
                 draw.rectangle([gx + 6, gy + 6, gx + 96, gy + 24], fill=(0, 0, 0))
@@ -294,13 +295,14 @@ def _apply_pass1_hard_gates(
             audit.dmca_advisory = "sound_campaign: clean audio verified — sync Official Sound in-app at visual climax"
     else:
         # strict_clean (default for 16:9 YPP / zero auto-muting distribution)
-        if transcript.dmca_flag and (not audit.dmca_clear or sug_dur > 60.0):
+        # Hard deterministic block whenever YAMNet detects licensed music (>=0.45) or a music_spike overlaps the window.
+        if transcript.dmca_flag or high_music or win_has_music:
             audit.dmca_clear = False
             audit.approved_for_pass2 = False
             audit.needs_demucs_rescue = True
             audit.dmca_risk_reason = (
                 audit.dmca_risk_reason
-                or f"Rejected by YAMNet anti-DMCA gate: music_prob_peak={transcript.music_prob_peak} (>={0.45})"
+                or f"Rejected by strict_clean YAMNet anti-DMCA gate: music_prob_peak={transcript.music_prob_peak} (>={0.45})"
             )
             audit.dmca_advisory = "strict_clean: queued for Carril 2 Colab T4 Demucs rescue"
 
@@ -374,10 +376,10 @@ def audit_slice_pass1(
     )
     prompt = (
         f"Audit slice_id='{cand.slice_id}' (duration={vdur:.1f}s, platform={cand.platform}, streamer={streamer_id}).\n"
-        f"{brief_block}"
+        f"{wrap_untrusted_source_data('operator_brief', brief_block) if brief_block.strip() else ''}\n"
         f"AudioSet YAMNet telemetry ({transcript.dmca_detector}): music_prob_peak={transcript.music_prob_peak}, "
         f"dmca_flag={transcript.dmca_flag}, music_spike_window={music_span_str}, top_events={transcript.yamnet_top_events[:5]}.\n"
-        f"Transcript with timestamps:\n{word_snippet}\n\n"
+        f"Transcript with timestamps:\n{wrap_untrusted_source_data('asr_transcript', word_snippet)}\n\n"
         "Classify scene_type strictly:\n"
         "- 'active_gameplay': live GTA VI gameplay with HUD/player control\n"
         "- 'trailer_or_video_reaction': watching a YouTube trailer or video\n"
@@ -429,8 +431,17 @@ def _checked_by_code(plan: EditPlan, transcript: AnnotatedTranscript, max_dur: f
         issues.append(f"end_trim {plan.end_trim:.2f} > slice duration {max_dur:.2f}")
     if plan.scene_type != "active_gameplay":
         issues.append(f"scene_type={plan.scene_type} != active_gameplay")
-    if plan.audio_policy != "keep_original" and not plan.dmca_clear:
-        issues.append(f"dmca_clear=False ({plan.dmca_risk_reason})")
+    if plan.audio_policy != "keep_original":
+        plan_has_music = any(
+            ev.kind == "music_spike" and ev.end > plan.start_trim and ev.start < plan.end_trim
+            for ev in transcript.non_verbal_events
+        )
+        if not plan.dmca_clear or transcript.dmca_flag or transcript.music_prob_peak >= 0.45 or plan_has_music:
+            plan.dmca_clear = False
+            issues.append(
+                f"anti-DMCA block ({plan.audio_policy}): dmca_clear={plan.dmca_clear}, "
+                f"music_prob_peak={transcript.music_prob_peak:.3f}, dmca_flag={transcript.dmca_flag}, win_music={plan_has_music}"
+            )
 
     all_in_window = [w for w in transcript.words if w.end > plan.start_trim and w.start < plan.end_trim]
     raw_text_low = " ".join(w.word for w in all_in_window).lower()
@@ -577,21 +588,29 @@ def curate_pass2_slice(
         "ZERO stream meta-talk (gifted subs/donations), a punchy <=10-word hook_headline, matched_lore_entity, "
         "and 1 animated motion_overlay callout (mode='motion_overlay', duration_sec 1.6-2.2s, NEVER freezing live video)."
     )
-    brief_block = _match_brief_context(brief)
+    raw_brief = _match_brief_context(brief)
+    brief_block = f"{wrap_untrusted_source_data('campaign_brief_and_lore', raw_brief)}\n\n" if raw_brief else ""
     blueprint_block = ""
     if scene_blueprint is not None:
         from src.scene_researcher import format_blueprint_for_prompt
 
         bp_txt = format_blueprint_for_prompt(scene_blueprint, max_tokens=300)
         if bp_txt:
-            blueprint_block = f"SCENE-MATCH VIRAL REFERENCE BLUEPRINT (<=300 tokens):\n{bp_txt}\n\n"
+            blueprint_block = (
+                "SCENE-MATCH VIRAL REFERENCE BLUEPRINT (<=300 tokens):\n"
+                f"{wrap_untrusted_source_data('scene_blueprint', bp_txt)}\n\n"
+            )
     rag_ctx = ""
     try:
         rag_topic = f"{audit.hook_headline} {audit.matched_lore_entity or ''} {brief or ''} synchresis seamless loop"
         rag_ctx = build_curator_rag_context(streamer_id=streamer_id or "gta6", topic_query=rag_topic, stage="pass2", max_tokens=550)
     except Exception:
         rag_ctx = ""
-    rag_block = f"RETRIEVED STUDIO RAG CONTEXT (<=550 tokens):\n{rag_ctx}\n\n" if rag_ctx else ""
+    rag_block = (
+        f"RETRIEVED STUDIO RAG CONTEXT (<=550 tokens):\n{wrap_untrusted_source_data('rag_context', rag_ctx)}\n\n"
+        if rag_ctx
+        else ""
+    )
     min_start = 1.0 if (cand.platform == "kick" and cand.signal_source == "kick_clips_rank" and vdur >= 24.0) else 0.0
 
     feedback_note = ""
@@ -606,7 +625,8 @@ def curate_pass2_slice(
             f"{rag_block}"
             f"Pass-1 window: {audit.suggested_start_sec:.2f}s -> {audit.suggested_end_sec:.2f}s (valid range {min_start:.1f}s..{vdur:.2f}s).\n"
             f"Scene type: {audit.scene_type}, YAMNet music_prob_peak={transcript.music_prob_peak}.\n"
-            f"Indexed words ([#idx start_sec]word; words marked NPC are game characters and hidden from subs):\n{word_lines}\n"
+            f"Indexed words ([#idx start_sec]word; words marked NPC are game characters and hidden from subs):\n"
+            f"{wrap_untrusted_source_data('asr_indexed_words', word_lines)}\n"
             f"{feedback_note}\n"
             "Rules:\n"
             "- Pick exact integer `start_word_idx` and `end_word_idx` from the indexed words above (total 18s..45s, <=55s).\n"
@@ -740,14 +760,18 @@ def generate_clip_packaging(plan: EditPlan, transcript: AnnotatedTranscript, str
         )
     except Exception:
         rag_ctx = ""
-    rag_block = f"RETRIEVED DESIGN/PACKAGING RAG CONTEXT (<=550 tokens):\n{rag_ctx}\n\n" if rag_ctx else ""
+    rag_block = (
+        f"RETRIEVED DESIGN/PACKAGING RAG CONTEXT (<=550 tokens):\n{wrap_untrusted_source_data('rag_packaging', rag_ctx)}\n\n"
+        if rag_ctx
+        else ""
+    )
     prompt = (
         f"Generate algorithmic 5-network packaging for approved GTA VI clip_id='{plan.clip_id}' (streamer={streamer_id}).\n"
         f"{rag_block}"
         f"Hook headline: {plan.hook_headline!r}\n"
         f"Matched lore entity: {plan.matched_lore_entity!r}\n"
         f"Duration: {plan.end_trim - plan.start_trim:.1f}s, voice_mode={plan.voice_mode}, dmca_clear={plan.dmca_clear}.\n"
-        f"Streamer transcript: {clip_text}\n\n"
+        f"Streamer transcript:\n{wrap_untrusted_source_data('clip_transcript', clip_text)}\n\n"
         "Constraints:\n"
         "- shorts_title: <= 60 characters, Tier-1 English, punchy, no AI-slop cliches.\n"
         "- shorts_hashtags: 3 to 5 clean hashtags (include #GTA6 #Shorts).\n"

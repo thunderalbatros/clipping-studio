@@ -366,6 +366,7 @@ def search_youtube_shorts_for_scene(
                 deno_spec,
                 "--remote-components",
                 "ejs:github",
+                "--",
                 f"ytsearch{min(10, max(5, max_results))}:{query}",
             ],
             capture_output=True,
@@ -484,7 +485,8 @@ def _analyze_camera_framing_ultraface(video_path: Path, dur: float) -> tuple[str
             )
             if res.returncode != 0 or not fp.is_file():
                 continue
-            img = Image.open(fp).convert("RGB")
+            with Image.open(fp) as _im:
+                img = _im.convert("RGB")
             arr = np.asarray(img, dtype=np.uint8)
             try:
                 faces = detect_faces_ultraface(arr, confidence=0.52)
@@ -552,7 +554,8 @@ def _extract_4frame_contact_strip(video_path: Path, dur: float, out_png: Path) -
                 timeout=15,
             )
             if res.returncode == 0 and fp.is_file():
-                tile = Image.open(fp).convert("RGB")
+                with Image.open(fp) as _im:
+                    tile = _im.convert("RGB")
                 gx, gy = (idx % 2) * tw, (idx // 2) * th
                 sheet.paste(tile, (gx, gy))
                 draw.rectangle([gx + 6, gy + 6, gx + 82, gy + 24], fill=(0, 0, 0))
@@ -603,7 +606,7 @@ def deconstruct_reference_video(
             cmd.extend(["--js-runtimes", deno_spec, "--remote-components", "ejs:github"])
         elif "kick.com" in url:
             cmd.extend(["--impersonate", "chrome"])
-        cmd.append(url)
+        cmd.extend(["--", url])
 
         dl_res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=90)
         mp4s = list(tmp_dir.glob("ref*.mp4"))

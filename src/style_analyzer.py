@@ -227,7 +227,8 @@ def _extract_4frame_strip(video_path: Path, dur: float, out_png: Path) -> Path |
                 timeout=20,
             )
             if res.returncode == 0 and fp.is_file():
-                tile = Image.open(fp).convert("RGB")
+                with Image.open(fp) as _im:
+                    tile = _im.convert("RGB")
                 gx, gy = (idx % 2) * tw, (idx // 2) * th
                 sheet.paste(tile, (gx, gy))
                 draw.rectangle([gx + 6, gy + 6, gx + 76, gy + 24], fill=(0, 0, 0))
@@ -309,7 +310,7 @@ def download_and_analyze_url(
             cmd.extend(["--js-runtimes", deno_spec, "--remote-components", "ejs:github"])
         elif "kick.com" in url:
             cmd.extend(["--impersonate", "chrome"])
-        cmd.append(url)
+        cmd.extend(["--", url])
         res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=90)
         mp4s = list(Path(tmp).glob("sample*.mp4"))
         if res.returncode != 0 or not mp4s:

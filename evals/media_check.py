@@ -142,7 +142,8 @@ def check_loudness_ebur128(video_path: Path) -> dict[str, Any]:
 
 def draw_safezones_overlay(frame_png: Path, out_png: Path) -> Path:
     """Draw 2026 double-layer safe-zones (Amber TikTok/Reels + Red Shorts/Universal) with Pillow."""
-    base = Image.open(frame_png).convert("RGBA")
+    with Image.open(frame_png) as _im:
+        base = _im.convert("RGBA")
     w, h = base.size
 
     # Capa Ambar (TikTok / Reels): top 180px, right 150px, bottom 400px.

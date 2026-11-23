@@ -411,7 +411,8 @@ def generate_contact_sheet(video_path: Path, out_png: Path, interval_sec: float 
                 ],
                 check=True,
             )
-            tile = Image.open(frame_png).convert("RGB")
+            with Image.open(frame_png) as _im:
+                tile = _im.convert("RGB")
             gx = (idx % cols) * tile_w
             gy = (idx // cols) * tile_h
             sheet.paste(tile, (gx, gy))

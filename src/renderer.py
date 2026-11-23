@@ -385,15 +385,19 @@ def render_ab_hook_variant(
         font = ImageFont.truetype(font_path, font_sz) if font_path else ImageFont.load_default()
         bbox = draw.textbbox((0, 0), clean_hook, font=font, stroke_width=4)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        pad_x, pad_y = 34, 18
-        box_w = min(900, tw + 2 * pad_x)
+        from src.schemas import UNIVERSAL_SAFE_BOX_9_16
+
+        safe_x0, _, safe_x1, _ = UNIVERSAL_SAFE_BOX_9_16
+        safe_w = safe_x1 - safe_x0
+        pad_x, pad_y = 30, 18
+        box_w = min(safe_w, tw + 2 * pad_x)
         box_h = th + 2 * pad_y
-        # Anchor cleanly inside Universal Safe Box seam (y ~ 685) so webcam eyes and captions stay unobstructed
-        bx1 = (1080 - box_w) // 2
+        # Anchor strictly inside Universal Safe Box [48..888] seam (y ~ 682) so right UI buttons stay unobstructed
+        bx1 = safe_x0 + max(0, (safe_w - box_w) // 2)
         by1 = 682
         bx2, by2 = bx1 + box_w, by1 + box_h
         draw.rounded_rectangle([bx1, by1, bx2, by2], radius=18, fill=(10, 12, 18, 224), outline=(255, 212, 0, 235), width=4)
-        tx = (1080 - tw) // 2
+        tx = bx1 + max(8, (box_w - tw) // 2)
         ty = by1 + pad_y - bbox[1]
         draw.text((tx, ty), clean_hook, font=font, fill=(255, 224, 64, 255), stroke_width=3, stroke_fill=(6, 8, 14, 255))
         ov.save(banner_png, format="PNG")
@@ -1341,7 +1345,8 @@ def render_master_clip(
                     timeout=20,
                 )
                 if raw_p.is_file():
-                    raw_img = Image.open(raw_p).convert("RGBA")
+                    with Image.open(raw_p) as _im:
+                        raw_img = _im.convert("RGBA")
                     composed_9_16 = _compose_adaptive_9_16(raw_img, layout, edit_plan.webcam_box_px).convert("RGB")
                     composed_9_16.save(clean_frames_dir / f"clean_{idx:02d}.jpg", format="JPEG", quality=94, subsampling=0)
                     raw_p.unlink(missing_ok=True)

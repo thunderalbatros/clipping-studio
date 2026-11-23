@@ -15,6 +15,7 @@ import shutil
 import statistics
 import subprocess
 import tempfile
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -183,46 +184,54 @@ class HLSSegment:
 
 
 class HLSRingBuffer:
-    """Memory-bounded circular ring-buffer holding up to `max_seconds` of raw `.ts` segments in RAM."""
+    """Thread-safe memory-bounded circular ring-buffer holding up to `max_seconds` of raw `.ts` segments in RAM."""
 
     def __init__(self, max_seconds: float = 95.0, max_ram_mb: float = 120.0) -> None:
         self.max_seconds = max_seconds
         self.max_bytes = int(max_ram_mb * 1024 * 1024)
+        self._lock = threading.RLock()
         self._segments: deque[HLSSegment] = deque()
         self._seen: deque[str] = deque(maxlen=400)
         self._total_bytes: int = 0
         self._total_duration: float = 0.0
 
     def has_seen(self, seq_url: str) -> bool:
-        return seq_url in self._seen
+        with self._lock:
+            return seq_url in self._seen
 
     def append(self, seq_url: str, duration: float, data: bytes) -> None:
-        if seq_url in self._seen or not data:
+        if not data:
             return
-        seg = HLSSegment(seq_url=seq_url, duration=max(0.5, duration), data=data, fetched_at=time.monotonic())
-        self._segments.append(seg)
-        self._seen.append(seq_url)
-        self._total_bytes += len(data)
-        self._total_duration += seg.duration
-        while (self._total_duration > self.max_seconds or self._total_bytes > self.max_bytes) and len(self._segments) > 2:
-            old = self._segments.popleft()
-            self._total_bytes -= len(old.data)
-            self._total_duration -= old.duration
+        with self._lock:
+            if seq_url in self._seen:
+                return
+            seg = HLSSegment(seq_url=seq_url, duration=max(0.5, duration), data=data, fetched_at=time.monotonic())
+            self._segments.append(seg)
+            self._seen.append(seq_url)
+            self._total_bytes += len(data)
+            self._total_duration += seg.duration
+            while (self._total_duration > self.max_seconds or self._total_bytes > self.max_bytes) and len(self._segments) > 2:
+                old = self._segments.popleft()
+                self._total_bytes -= len(old.data)
+                self._total_duration -= old.duration
 
     @property
     def ram_mb(self) -> float:
-        return round(self._total_bytes / (1024 * 1024), 2)
+        with self._lock:
+            return round(self._total_bytes / (1024 * 1024), 2)
 
     @property
     def duration_sec(self) -> float:
-        return round(self._total_duration, 2)
+        with self._lock:
+            return round(self._total_duration, 2)
 
     def snapshot_bytes(self) -> tuple[bytes, float]:
-        """Return concatenated MPEG-TS payload + duration for safe async flush."""
-        if not self._segments:
-            return b"", 0.0
-        payload = b"".join(s.data for s in self._segments)
-        return payload, round(self._total_duration, 2)
+        """Return concatenated MPEG-TS payload + duration for safe concurrent async flush."""
+        with self._lock:
+            if not self._segments:
+                return b"", 0.0
+            payload = b"".join(s.data for s in self._segments)
+            return payload, round(self._total_duration, 2)
 
     def flush_to_mp4(self, out_mp4: Path) -> tuple[bool, float]:
         """Remux/normalize the buffered MPEG-TS ring-buffer into a clean CFR MP4 slice."""
@@ -301,7 +310,7 @@ def resolve_live_hls_url(platform: str, channel: str) -> tuple[str | None, int |
                 return res.stdout.strip().splitlines()[0], None
         ytdlp = shutil.which("yt-dlp") or str(Path(RUNS_DIR.parent) / ".venv" / "Scripts" / "yt-dlp.exe")
         res = subprocess.run(
-            [ytdlp, "--no-warnings", "-f", "best[height<=1080]/best", "-g", url],
+            [ytdlp, "--no-warnings", "-f", "best[height<=1080]/best", "-g", "--", url],
             capture_output=True,
             text=True,
             check=False,

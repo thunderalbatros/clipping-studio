@@ -89,10 +89,36 @@ def _ensure_media_path() -> None:
         os.environ["PATH"] = os.pathsep.join(prefix) + os.pathsep + current
 
 
+PROTECTED_RUN_SUBDIRS = frozenset({"branding"})
+PROTECTED_CLIP_STATUSES = frozenset({"READY_HITL", "NEEDS_VISUAL_FIX"})
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def validate_run_id(run_id: str, runs_root: Path = RUNS_DIR) -> Path:
+    """Validate `--run-id` against conservative regex and guarantee resolved path stays strictly inside `runs/`."""
+    rid = (run_id or "").strip()
+    if not _RUN_ID_RE.fullmatch(rid):
+        raise ValueError(
+            f"Invalid run_id {run_id!r}: must match ^[A-Za-z0-9_-]{{1,64}}$ (no path traversal or special chars)."
+        )
+    base = runs_root.resolve()
+    target = (base / rid).resolve()
+    if not target.is_relative_to(base) or target == base:
+        raise ValueError(f"Path traversal blocked for run_id={run_id!r}")
+    return target
+
+
 def _dir_size_bytes(path: Path) -> int:
     if not path.exists():
         return 0
     return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+
+def measure_runs_usage_mb(runs_root: Path = RUNS_DIR) -> float:
+    """Read-only measurement of disk usage under `runs/` in MB (never deletes files)."""
+    if not runs_root.exists():
+        return 0.0
+    return round(_dir_size_bytes(runs_root) / (1024 * 1024), 2)
 
 
 def get_runs_max_gb() -> float:
@@ -102,18 +128,57 @@ def get_runs_max_gb() -> float:
     return 4.0
 
 
-def enforce_runs_quota(runs_root: Path = RUNS_DIR, max_gb: float | None = None, protect_dir: Path | None = None) -> float:
-    """Enforce hard disk quota on runs/ by removing oldest finished run dirs if exceeded."""
+def _protected_run_ids_from_db(db_path: Path) -> set[str]:
+    """Return run_ids that own READY_HITL or NEEDS_VISUAL_FIX clips in SQLite so quota cleanup never deletes them."""
+    if not db_path.is_file():
+        return set()
+    import sqlite3
+
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5.0)
+        cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(clips)").fetchall()}
+        if not cols:
+            return set()
+        if "status" in cols:
+            placeholders = ",".join("?" for _ in PROTECTED_CLIP_STATUSES)
+            rows = conn.execute(
+                f"SELECT DISTINCT run_id FROM clips WHERE status IN ({placeholders})",
+                tuple(PROTECTED_CLIP_STATUSES),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT DISTINCT run_id FROM clips WHERE media_check_passed = 1").fetchall()
+        return {str(r[0]) for r in rows if r and r[0]}
+    except Exception:
+        return set()
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def enforce_runs_quota(
+    runs_root: Path = RUNS_DIR,
+    max_gb: float | None = None,
+    protect_dir: Path | None = None,
+    db_path: Path | None = None,
+) -> float:
+    """Enforce hard disk quota on runs/ while strictly protecting `runs/branding/`, studio.db, and READY_HITL/NEEDS_VISUAL_FIX runs."""
     runs_root.mkdir(parents=True, exist_ok=True)
     limit_gb = max_gb if max_gb is not None else get_runs_max_gb()
     limit_bytes = int(limit_gb * (1024**3))
     used = _dir_size_bytes(runs_root)
 
     if used > limit_bytes:
+        effective_db = db_path if db_path is not None else (runs_root / "studio.db")
+        protected_run_ids = _protected_run_ids_from_db(effective_db)
+        protect_resolved = protect_dir.resolve() if protect_dir is not None else None
         candidates = [
             d
             for d in runs_root.iterdir()
-            if d.is_dir() and (protect_dir is None or d.resolve() != protect_dir.resolve())
+            if d.is_dir()
+            and d.name not in PROTECTED_RUN_SUBDIRS
+            and d.name not in protected_run_ids
+            and (protect_resolved is None or d.resolve() != protect_resolved)
         ]
         candidates.sort(key=lambda p: p.stat().st_mtime)
         target_bytes = int(limit_bytes * 0.80)
@@ -346,12 +411,20 @@ def probe_kick_channel(slug: str) -> dict[str, Any]:
         if resp.status_code == 200:
             data = resp.json()
             vods = data.get("previous_livestreams") or []
+            ls = data.get("livestream")
+            playback_url = str(
+                data.get("playback_url")
+                or (ls.get("playback_url") if isinstance(ls, dict) else "")
+                or ""
+            ).strip()
             return {
+                "id": data.get("id"),
                 "slug": slug,
                 "status_code": 200,
                 "ok": True,
                 "reason": "OK",
-                "is_live": bool(data.get("livestream")),
+                "is_live": bool(ls),
+                "playback_url": playback_url or None,
                 "recent_vod_count": len(vods) if isinstance(vods, list) else 0,
             }
         reason = "WAF_403_CHALLENGE" if resp.status_code == 403 else f"HTTP_{resp.status_code}"
@@ -564,6 +637,7 @@ def _windows_from_audio_rms(url: str, tmp_dir: Path, total_dur: float, top_k: in
         "ffmpeg:-ac 1 -ar 16000",
         "-o",
         f"{tmp_stem}.%(ext)s",
+        "--",
         url,
     ])
     res = _run(cmd)
@@ -571,18 +645,29 @@ def _windows_from_audio_rms(url: str, tmp_dir: Path, total_dur: float, top_k: in
     try:
         if res.returncode != 0 or not wav_path.exists():
             raise RuntimeError(f"Audio probe failed: {(res.stderr or res.stdout)[:240]}")
-        with wave.open(str(wav_path), "rb") as wf:
-            sr = wf.getframerate()
-            frames = wf.readframes(wf.getnframes())
-        samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
-        dur = len(samples) / float(sr) if sr else total_dur
-        win = max(1, int(sr * 5.0))
-        n_wins = max(1, len(samples) // win)
         scored: list[tuple[float, float]] = []
-        for idx in range(n_wins):
-            chunk = samples[idx * win : (idx + 1) * win]
-            rms = float(np.sqrt(np.mean(chunk * chunk) + 1e-12))
-            scored.append((idx * 5.0 + 2.5, rms))
+        with wave.open(str(wav_path), "rb") as wf:
+            sr = wf.getframerate() or 16000
+            n_channels = max(1, wf.getnchannels())
+            total_frames = wf.getnframes()
+            dur = total_frames / float(sr) if total_frames > 0 else total_dur
+            win_frames = max(1, int(sr * 5.0))
+            idx = 0
+            # Stream 5-second chunks (~160 KB RAM) instead of loading multi-hour WAV into 3.5 GB float32 RAM
+            while True:
+                raw = wf.readframes(win_frames)
+                if not raw:
+                    break
+                chunk = np.frombuffer(raw, dtype=np.int16)
+                if chunk.size == 0:
+                    break
+                if n_channels > 1:
+                    chunk = chunk[::n_channels]
+                chunk_f = chunk.astype(np.float32) / 32768.0
+                rms = float(np.sqrt(float(np.mean(chunk_f * chunk_f)) + 1e-12))
+                scored.append((idx * 5.0 + 2.5, rms))
+                idx += 1
+                del chunk, chunk_f
         return _select_non_overlapping_peaks(scored, dur, top_k=top_k)
     finally:
         for f in tmp_dir.glob("full_probe_audio*"):
@@ -604,7 +689,7 @@ def _windows_from_twitch_chat(
     # Probe duration cheaply so mega-VODs (>3h) scan a bounded 90-min active gameplay window in <60s
     probed_dur = total_dur
     if probed_dur <= 0 and chat_window_sec > 0:
-        pr = _run(_yt_dlp_base_cmd() + ["--print", "duration", "--skip-download", f"https://www.twitch.tv/videos/{vod_id}"])
+        pr = _run(_yt_dlp_base_cmd() + ["--print", "duration", "--skip-download", "--", f"https://www.twitch.tv/videos/{vod_id}"])
         if pr.returncode == 0:
             try:
                 probed_dur = float((pr.stdout or "").strip().splitlines()[-1])
@@ -698,6 +783,7 @@ def _download_slice_and_audio_ytdlp(
             "mp4",
             "-o",
             str(out_video),
+            "--",
             url,
         ])
         return _run(cmd)
@@ -883,7 +969,7 @@ def mine_vod_slices(
     validate_streamer_whitelist(streamer_id, allow_unlisted=allow_unlisted, source_url=url, persist_new=True)
 
     rid = run_id or datetime.now(UTC).strftime("run_%Y%m%d_%H%M%S")
-    run_dir = RUNS_DIR / rid
+    run_dir = validate_run_id(rid, RUNS_DIR)
     run_dir.mkdir(parents=True, exist_ok=True)
     enforce_runs_quota(RUNS_DIR, protect_dir=run_dir)
 
@@ -897,7 +983,7 @@ def mine_vod_slices(
     else:
         heatmap: list[dict[str, object]] = []
         if platform != "twitch":
-            meta_cmd = _yt_dlp_base_cmd() + ["--dump-single-json", "--skip-download", url]
+            meta_cmd = _yt_dlp_base_cmd() + ["--dump-single-json", "--skip-download", "--", url]
             meta_res = _run(meta_cmd)
             if meta_res.returncode != 0:
                 raise RuntimeError(f"Metadata probe failed: {(meta_res.stderr or meta_res.stdout)[:300]}")
@@ -933,7 +1019,7 @@ def mine_vod_slices(
 
         if not windows:
             if total_dur <= 0:
-                meta_res = _run(_yt_dlp_base_cmd() + ["--dump-single-json", "--skip-download", url])
+                meta_res = _run(_yt_dlp_base_cmd() + ["--dump-single-json", "--skip-download", "--", url])
                 if meta_res.returncode == 0:
                     meta = json.loads(meta_res.stdout)
                     total_dur = float(meta.get("duration") or 120.0)

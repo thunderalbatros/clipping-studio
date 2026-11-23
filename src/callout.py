@@ -28,7 +28,7 @@ from typing import Any
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
-from src.schemas import EditPlan, FreezeFrameSpec
+from src.schemas import UNIVERSAL_SAFE_BOX_9_16, EditPlan, FreezeFrameSpec
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _BUNDLED_FONT = PROJECT_ROOT / "assets" / "fonts" / "Montserrat-Black.ttf"
@@ -36,7 +36,7 @@ _FALLBACK_FONT = Path(r"C:\Windows\Fonts\seguibl.ttf")
 
 OVERLAY_BAND_W = 1080
 OVERLAY_BAND_H = 440
-# Positioned right below the webcam seam (y=676) inside the Universal Red Safe Box [48..888, 288..1248]
+# Positioned right below the webcam seam (y=678) inside the shared UNIVERSAL_SAFE_BOX_9_16 [48..888, 420..1248]
 # and cleanly above bottom captions (y=1120) so overlay and captions never collide.
 OVERLAY_DEFAULT_Y = 678
 
@@ -159,11 +159,11 @@ def _build_motion_overlay_html(
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 0 56px;
+    padding: 0 {max(0, width - UNIVERSAL_SAFE_BOX_9_16[2])}px 0 {UNIVERSAL_SAFE_BOX_9_16[0]}px;
   }}
   .scrim {{
     position: absolute;
-    inset: 14px 48px;
+    inset: 14px {max(0, width - UNIVERSAL_SAFE_BOX_9_16[2])}px 14px {UNIVERSAL_SAFE_BOX_9_16[0]}px;
     border-radius: 999px;
     background: radial-gradient(
       ellipse at center,
@@ -543,33 +543,47 @@ def _render_frames_pillow_fallback(
     font_sz = 92 if max_chars <= 10 else (82 if max_chars <= 13 else 72)
     font = _load_font(font_sz)
 
-    # Pre-render static high-res editorial text layer (transparent RGBA)
+    # Pre-render static high-res editorial text layer (transparent RGBA) strictly inside UNIVERSAL_SAFE_BOX_9_16
+    safe_x0 = UNIVERSAL_SAFE_BOX_9_16[0]
+    safe_x1 = min(width, UNIVERSAL_SAFE_BOX_9_16[2])
+    safe_w = max(200, safe_x1 - safe_x0)
     text_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(text_layer)
     total_words = sum(len(ln.split()) for ln in lines)
-    line_metrics: list[tuple[list[tuple[str, bool, int]], int, int]] = []
-    word_idx = 0
-    for ln in lines:
-        toks: list[tuple[str, bool, int]] = []
-        lw = 0
-        lh = 0
-        parts = ln.split()
-        for pi, w in enumerate(parts):
-            word_idx += 1
-            is_acc = word_idx == total_words and total_words >= 2
-            seg = w + (" " if pi + 1 < len(parts) else "")
-            bb = draw.textbbox((0, 0), seg, font=font, stroke_width=6)
-            tw = round(bb[2] - bb[0])
-            th = round(bb[3] - bb[1])
-            toks.append((seg, is_acc, tw))
-            lw += tw
-            lh = max(lh, th)
-        line_metrics.append((toks, lw, lh))
+
+    def _measure_lines(fnt: ImageFont.FreeTypeFont | ImageFont.ImageFont) -> tuple[list[tuple[list[tuple[str, bool, int]], int, int]], int]:
+        metrics: list[tuple[list[tuple[str, bool, int]], int, int]] = []
+        w_idx = 0
+        max_lw = 0
+        for ln in lines:
+            toks: list[tuple[str, bool, int]] = []
+            lw = 0
+            lh = 0
+            parts = ln.split()
+            for pi, w in enumerate(parts):
+                w_idx += 1
+                is_acc = w_idx == total_words and total_words >= 2
+                seg = w + (" " if pi + 1 < len(parts) else "")
+                bb = draw.textbbox((0, 0), seg, font=fnt, stroke_width=6)
+                tw = round(bb[2] - bb[0])
+                th = round(bb[3] - bb[1])
+                toks.append((seg, is_acc, tw))
+                lw += tw
+                lh = max(lh, th)
+            max_lw = max(max_lw, lw)
+            metrics.append((toks, lw, lh))
+        return metrics, max_lw
+
+    line_metrics, widest_lw = _measure_lines(font)
+    while widest_lw > safe_w and font_sz > 38:
+        font_sz -= 6
+        font = _load_font(font_sz)
+        line_metrics, widest_lw = _measure_lines(font)
 
     total_h = sum(m[2] for m in line_metrics) + max(0, len(line_metrics) - 1) * 14
     cy = (height - total_h) // 2 - 14
     for toks, lw, lh in line_metrics:
-        cx = (width - lw) // 2
+        cx = safe_x0 + max(0, (safe_w - lw) // 2)
         for seg, is_acc, tw in toks:
             fill = (*accent_rgb, 255) if is_acc else (255, 255, 255, 255)
             # Hard editorial drop shadow
@@ -837,7 +851,8 @@ def render_freeze_callout(
             ],
             check=True,
         )
-        src_img = Image.open(raw_frame).convert("RGBA")
+        with Image.open(raw_frame) as _im:
+            src_img = _im.convert("RGBA")
 
     canvas = _compose_adaptive_9_16(src_img, layout, edit_plan.webcam_box_px)
     # 1.14x punch-in comedic zoom on the full composed frame
@@ -860,7 +875,8 @@ def render_freeze_callout(
         _render_frames_pillow_fallback(ff.callout_text, tdir, duration_sec=0.4, fps=10, accent_color=ff.accent_color)
         peak_p = tdir / "frame_0002.png"
         if peak_p.is_file():
-            ov_band = Image.open(peak_p).convert("RGBA")
+            with Image.open(peak_p) as _im:
+                ov_band = _im.convert("RGBA")
             composed.alpha_composite(ov_band, dest=(0, OVERLAY_DEFAULT_Y))
 
     out_png.parent.mkdir(parents=True, exist_ok=True)

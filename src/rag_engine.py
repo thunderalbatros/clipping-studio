@@ -612,7 +612,7 @@ def rebuild_rag_index(
             if use_vec and rowid > 0:
                 to_embed.append((rowid, f"{heading}\n{content}"))
 
-        # Prune stale chunk_ids no longer present
+        # Prune stale chunk_ids no longer present + any orphan vectors in rag_chunks_vec
         stale_ids = set(existing_rows) - active_chunk_ids
         if stale_ids:
             for sid in stale_ids:
@@ -620,6 +620,15 @@ def rebuild_rag_index(
                 conn.execute("DELETE FROM rag_chunks WHERE rowid = ?", (s_rowid,))
                 if use_vec:
                     conn.execute("DELETE FROM rag_chunks_vec WHERE chunk_rowid = ?", (s_rowid,))
+        if use_vec:
+            orphan_ids = [
+                int(r[0])
+                for r in conn.execute(
+                    "SELECT chunk_rowid FROM rag_chunks_vec WHERE chunk_rowid NOT IN (SELECT rowid FROM rag_chunks)"
+                ).fetchall()
+            ]
+            for oid in orphan_ids:
+                conn.execute("DELETE FROM rag_chunks_vec WHERE chunk_rowid = ?", (oid,))
 
         # Rebuild external-content FTS5 index atomically (guaranteed 100% consistent)
         conn.execute("INSERT INTO rag_chunks_fts(rag_chunks_fts) VALUES('rebuild')")
