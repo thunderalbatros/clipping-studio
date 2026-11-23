@@ -13,6 +13,7 @@ description: >-
 - Después de cada render de clip `9:16`, portada `cover_9_16.jpg` o miniatura `thumbnail_1280x720.jpg`, y **antes** de aprobar la publicación.
 
 ## Protocolo de Evaluación (Gate de Salida)
+0. **Memoria RAG (`src/rag_engine.py`):** Antes de emitir veto o aprobar portada/clip, consultar `python -m src.cli rag query "<query>" --domain design_ctr` y `--domain episodic_memory` para contrastar métricas históricas y reglas de `design_bible.md`.
 1. **Inspección Técnica de Video (`[RUNTIME REAL]` vía `ffmpeg-mcp-lite` / `ffprobe`):**
    - Confirmar resolución exacta `1080x1920` (9:16), `pix_fmt=yuv420p`, FPS constante (30/60), duración objetivo y audio limpio (`-14.0 LUFS`, `<= -1.0 dBTP`).
    - Extraer **4–6 frames clave en PNG/WebP** (`0.2s`, `1.5s`, `3.0s`, medio, pico de acción y cierre `-0.5s`); nunca subir el MP4 completo al VLM salvo fallo crítico.

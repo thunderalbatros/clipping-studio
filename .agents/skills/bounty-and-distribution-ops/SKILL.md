@@ -13,6 +13,7 @@ description: >-
 - Antes de producir un lote dirigido a una campaña o al registrar métricas post-publicación en `runs/studio.db`.
 
 ## Protocolo Operativo
+0. **Memoria RAG (`src/rag_engine.py`):** Antes de auditar una campaña o brief, consultar `python -m src.cli rag query "<query>" --domain bounties_dmca` para validar reglas anti-DMCA, audio-policy y criterios geo vigentes.
 1. **Auditoría Determinista de Bounties CPM (Gate Humano Obligatorio):**
    - Medir *burn rate* del presupuesto entre **2 snapshots separados** registrados en la tabla `campaigns` de `runs/studio.db`:
      - **20%–80%:** zona saludable (`APROBAR` si pasa compliance).
