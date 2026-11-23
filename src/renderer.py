@@ -8,12 +8,13 @@ import shutil
 import subprocess
 import tempfile
 import wave
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import yaml
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from src.callout import render_freeze_callout
 from src.captions import generate_karaoke_ass, remap_time_through_segments
@@ -185,6 +186,265 @@ def compute_jump_cut_segments(
     if total_kept < 15.0 or len(kept) <= 1:
         return [(0.0, round(clip_dur, 3))]
     return kept
+
+
+def find_auto_editor_executable() -> Path | None:
+    """Locate auto-editor CLI inside project .venv or PATH."""
+    venv_ae = PROJECT_ROOT / ".venv" / "Scripts" / "auto-editor.exe"
+    if venv_ae.is_file():
+        return venv_ae
+    found = shutil.which("auto-editor")
+    return Path(found) if found else None
+
+
+def detect_segments_auto_editor(
+    source_slice: Path,
+    start_trim: float,
+    clip_dur: float,
+    transcript: AnnotatedTranscript,
+    pcm_16k: np.ndarray | None = None,
+    margin_sec: float = 0.25,
+    threshold_pct: float = 4.0,
+    min_cut_sec: float = 0.95,
+    max_cuts: int = 3,
+) -> tuple[list[tuple[float, float]] | None, dict[str, Any]]:
+    """Run WyattBlue/auto-editor (`--export v3`) for dead-air detection with gaming Synchresis guardrails.
+
+    Preserves:
+    - `margin_sec=0.25s` Synchresis breathing room around every loud event.
+    - Dramatic pauses `< 0.95s` (never removes brief comedic beats).
+    - Opening `1.5s` (action hook) and closing `3.5s` (climax / seamless loop).
+    - Protected non-verbal events (`shouting`, `laughter`, `visual_motion`) and loud game SFX (`> -30 dBFS`).
+    - Rejects over-aggressive edits (>35% cut or <15.0s kept) so caller cleanly falls back to PCM analyzer.
+    """
+    ae_bin = find_auto_editor_executable()
+    if ae_bin is None or clip_dur < 16.0:
+        return None, {"provider": "auto_editor", "used": False, "reason": "binary_missing_or_short_clip"}
+
+    protected_events = [
+        (max(0.0, ev.start - start_trim), min(clip_dur, ev.end - start_trim))
+        for ev in transcript.non_verbal_events
+        if ev.kind in {"shouting", "laughter", "visual_motion"}
+        and ev.end > start_trim
+        and ev.start < start_trim + clip_dur
+    ]
+
+    with tempfile.TemporaryDirectory(prefix="cs_ae_") as tmp:
+        tmp_dir = Path(tmp)
+        clip_wav = tmp_dir / "clip.wav"
+        v3_json = tmp_dir / "timeline.v3"
+
+        ext_res = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{start_trim:.3f}",
+                "-t",
+                f"{clip_dur:.3f}",
+                "-i",
+                str(source_slice.resolve()),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "48000",
+                "-c:a",
+                "pcm_s16le",
+                str(clip_wav),
+            ],
+            capture_output=True,
+            check=False,
+            timeout=25,
+        )
+        if ext_res.returncode != 0 or not clip_wav.is_file():
+            return None, {"provider": "auto_editor", "used": False, "reason": "wav_extract_failed"}
+
+        ae_res = subprocess.run(
+            [
+                str(ae_bin),
+                str(clip_wav),
+                "--margin",
+                f"{margin_sec:.2f}s",
+                "--edit",
+                f"audio:threshold={threshold_pct:g}%",
+                "--export",
+                "v3",
+                "-o",
+                str(v3_json),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if ae_res.returncode != 0 or not v3_json.is_file():
+            return None, {"provider": "auto_editor", "used": False, "reason": f"ae_exit_{ae_res.returncode}"}
+
+        try:
+            tl = json.loads(v3_json.read_text(encoding="utf-8"))
+            tb = float(Fraction(str(tl.get("timebase", "30"))))
+            tracks = tl.get("a") or tl.get("v") or []
+            raw_clips = tracks[0] if tracks and isinstance(tracks[0], list) else []
+        except Exception as exc:
+            return None, {"provider": "auto_editor", "used": False, "reason": f"v3_parse_error:{exc}"}
+
+    if not raw_clips or tb <= 0:
+        return [(0.0, round(clip_dur, 3))], {"provider": "auto_editor", "used": True, "cuts_applied": 0}
+
+    # Reconstruct candidate silent gaps between kept auto-editor chunks
+    ae_kept = sorted(
+        [(float(c.get("offset", 0)) / tb, (float(c.get("offset", 0)) + float(c.get("dur", 0))) / tb) for c in raw_clips],
+        key=lambda x: x[0],
+    )
+    approved_cuts: list[tuple[float, float]] = []
+    for i in range(len(ae_kept) - 1):
+        g_start = max(0.0, ae_kept[i][1])
+        g_end = min(clip_dur, ae_kept[i + 1][0])
+        if g_end - g_start < min_cut_sec:
+            continue
+        if g_start < 1.5 or g_end > clip_dur - 3.5:
+            continue
+        if any(not (g_end <= ps or g_start >= pe) for ps, pe in protected_events):
+            continue
+        if pcm_16k is not None and len(pcm_16k) > 0:
+            s_idx = max(0, min(len(pcm_16k) - 1, int(g_start * 16000)))
+            e_idx = max(s_idx + 1, min(len(pcm_16k), int(g_end * 16000)))
+            seg = pcm_16k[s_idx:e_idx]
+            rms = float(np.sqrt(np.mean(seg * seg)) + 1e-9)
+            db = 20.0 * float(np.log10(rms))
+            if db > -30.0:
+                continue
+        approved_cuts.append((round(g_start, 3), round(g_end, 3)))
+        if len(approved_cuts) >= max_cuts:
+            break
+
+    if not approved_cuts:
+        return [(0.0, round(clip_dur, 3))], {
+            "provider": "auto_editor",
+            "used": True,
+            "raw_ae_chunks": len(ae_kept),
+            "cuts_applied": 0,
+            "margin_sec": margin_sec,
+        }
+
+    kept: list[tuple[float, float]] = []
+    cursor = 0.0
+    for cs, ce in approved_cuts:
+        if cs > cursor + 0.2:
+            kept.append((round(cursor, 3), round(cs, 3)))
+        cursor = ce
+    if clip_dur > cursor + 0.2:
+        kept.append((round(cursor, 3), round(clip_dur, 3)))
+
+    total_kept = sum(e - s for s, e in kept)
+    removed_ratio = 1.0 - (total_kept / max(1.0, clip_dur))
+    if total_kept < 15.0 or removed_ratio > 0.35 or len(kept) <= 1:
+        return None, {
+            "provider": "auto_editor",
+            "used": False,
+            "reason": f"over_aggressive_fallback(removed={removed_ratio:.2f},kept={total_kept:.1f}s)",
+        }
+
+    return kept, {
+        "provider": "auto_editor",
+        "used": True,
+        "raw_ae_chunks": len(ae_kept),
+        "cuts_applied": len(approved_cuts),
+        "removed_sec": round(clip_dur - total_kept, 2),
+        "margin_sec": margin_sec,
+    }
+
+
+def render_ab_hook_variant(
+    master_mp4: Path,
+    alt_hook_text: str,
+    out_mp4: Path,
+    duration_sec: float = 3.0,
+    compute_profile: str = "local_hp",
+) -> Path:
+    """Render Variant B MP4 (0-3s alternative hook banner + fresh re-encode hash) for IG Trial Reels / TikTok A/B."""
+    apply_thread_budget()
+    out_mp4.parent.mkdir(parents=True, exist_ok=True)
+    clean_hook = " ".join(alt_hook_text.strip().upper().split()[:6]) or "WAIT FOR THIS"
+
+    with tempfile.TemporaryDirectory(prefix="cs_ab_var_") as tmp:
+        work_dir = Path(tmp)
+        banner_png = work_dir / "hook_banner.png"
+        ov = Image.new("RGBA", (1080, 1920), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(ov)
+
+        font_path = str(BUNDLED_FONT_PATH) if BUNDLED_FONT_PATH.is_file() else None
+        font_sz = 54 if len(clean_hook) <= 18 else 44
+        font = ImageFont.truetype(font_path, font_sz) if font_path else ImageFont.load_default()
+        bbox = draw.textbbox((0, 0), clean_hook, font=font, stroke_width=4)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        pad_x, pad_y = 34, 18
+        box_w = min(900, tw + 2 * pad_x)
+        box_h = th + 2 * pad_y
+        # Anchor cleanly inside Universal Safe Box seam (y ~ 685) so webcam eyes and captions stay unobstructed
+        bx1 = (1080 - box_w) // 2
+        by1 = 682
+        bx2, by2 = bx1 + box_w, by1 + box_h
+        draw.rounded_rectangle([bx1, by1, bx2, by2], radius=18, fill=(10, 12, 18, 224), outline=(255, 212, 0, 235), width=4)
+        tx = (1080 - tw) // 2
+        ty = by1 + pad_y - bbox[1]
+        draw.text((tx, ty), clean_hook, font=font, fill=(255, 224, 64, 255), stroke_width=3, stroke_fill=(6, 8, 14, 255))
+        ov.save(banner_png, format="PNG")
+
+        start_s = 0.05
+        end_s = max(0.8, min(4.0, duration_sec))
+        flt = (
+            f"[1:v]trim=duration={end_s:.3f},setpts=PTS-STARTPTS+{start_s:.3f}/TB[ov];"
+            f"[0:v][ov]overlay=0:0:enable='between(t,{start_s:.3f},{start_s + end_s:.3f})':eof_action=pass,format=nv12[vout]"
+        )
+        base_cmd = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(master_mp4.resolve()),
+            "-loop",
+            "1",
+            "-i",
+            "hook_banner.png",
+            "-filter_complex",
+            flt,
+            "-map",
+            "[vout]",
+            "-map",
+            "0:a?",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+            "-ar",
+            "48000",
+            "-movflags",
+            "+faststart",
+        ]
+        enc = (
+            ["-c:v", "h264_nvenc", "-cq", "19"]
+            if compute_profile in {"gcp_spot_l4", "colab_t4"}
+            else ["-c:v", "h264_qsv", "-global_quality", "18", "-look_ahead", "0"]
+        )
+        res = subprocess.run(base_cmd + enc + [str(out_mp4.resolve())], cwd=str(work_dir), capture_output=True, text=True, check=False)
+        if res.returncode != 0 or not out_mp4.exists():
+            fb = subprocess.run(
+                base_cmd + ["-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p", str(out_mp4.resolve())],
+                cwd=str(work_dir),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if fb.returncode != 0:
+                raise RuntimeError(f"A/B variant render failed: {fb.stderr[-300:]}")
+    return out_mp4
 
 
 def find_punch_in_windows(
@@ -554,6 +814,7 @@ def render_master_clip(
     transcript: AnnotatedTranscript,
     out_mp4: Path,
     compute_profile: str = "local_hp",
+    use_auto_editor: bool = True,
 ) -> Path:
     """Render Senior-grade 1080x1920 H.264 clip (60fps, <=1.8x card, jump-cuts, punch-in zoom, bleeper, SFX, loudnorm)."""
     apply_thread_budget()
@@ -592,14 +853,27 @@ def render_master_clip(
 
     raw_clip_dur = round(max(1.0, edit_plan.end_trim - edit_plan.start_trim), 3)
     pcm_16k = _extract_clip_pcm_16k(source_slice, edit_plan.start_trim, raw_clip_dur)
-    kept_segments = compute_jump_cut_segments(
-        raw_clip_dur,
-        edit_plan.start_trim,
-        transcript,
-        pcm_16k=pcm_16k,
-        cut_silence_over_sec=cut_silence_sec,
-        preserve_pause_sec=synchresis_sec,
-    )
+    kept_segments: list[tuple[float, float]] | None = None
+    ae_info: dict[str, Any] = {"provider": "pcm_fallback", "used": False}
+    if use_auto_editor:
+        kept_segments, ae_info = detect_segments_auto_editor(
+            source_slice=source_slice,
+            start_trim=edit_plan.start_trim,
+            clip_dur=raw_clip_dur,
+            transcript=transcript,
+            pcm_16k=pcm_16k,
+            margin_sec=synchresis_sec,
+            min_cut_sec=max(0.95, cut_silence_sec + 0.30),
+        )
+    if kept_segments is None:
+        kept_segments = compute_jump_cut_segments(
+            raw_clip_dur,
+            edit_plan.start_trim,
+            transcript,
+            pcm_16k=pcm_16k,
+            cut_silence_over_sec=cut_silence_sec,
+            preserve_pause_sec=synchresis_sec,
+        )
     out_dur = round(sum(e - s for s, e in kept_segments), 3)
 
     ff_start = 0.0
@@ -642,6 +916,7 @@ def render_master_clip(
         print(
             f"[RENDERER] layout={layout['layout_mode']} cam_upscale={layout['webcam_upscale_factor']}x "
             f"no_overlap={layout['no_webcam_gameplay_overlap']} src_fps={src_fps} "
+            f"dead_air_engine={ae_info.get('provider') if ae_info.get('used') else 'pcm_fallback'} "
             f"jump_segs={len(kept_segments)} punch_ins={len(punch_windows)} bleeps={len(bleep_spans)} "
             f"pass1_i={loud_stats['input_i']} tp={loud_stats['input_tp']}"
         )

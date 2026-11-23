@@ -27,7 +27,7 @@ from src.miner import (
     mine_vod_slices,
     probe_kick_channel,
 )
-from src.renderer import render_master_clip
+from src.renderer import render_ab_hook_variant, render_master_clip
 from src.resource_guard import heavy_local_allowed
 from src.schemas import ClipPackaging, RunState
 from src.transcriber import transcribe_run
@@ -43,7 +43,9 @@ def _log_telemetry(run_id: str, event_type: str, event: dict[str, object]) -> No
     insert_telemetry(run_id, event_type, event)
 
 
-def _render_and_verify(run_dir: Path, state: RunState) -> RunState:
+def _render_and_verify(run_dir: Path, state: RunState, ab_variants: int = 1) -> RunState:
+    from src.design_engine import render_editorial_cover_9_16
+
     compute_profile = os.getenv("COMPUTE_PROFILE", "local_hp").strip() or "local_hp"
     cand_map = {c.slice_id: c for c in state.candidates}
     tr_map = {t.slice_id: t for t in state.transcripts}
@@ -76,10 +78,38 @@ def _render_and_verify(run_dir: Path, state: RunState) -> RunState:
         pkg_json_str = ""
         if verdict["passed"]:
             pkg = generate_clip_packaging(plan, tr, state.streamer_id)
+            try:
+                cover_clean = run_dir / f"{plan.clip_id}_cover_clean.jpg"
+                cover_9_16 = run_dir / f"{plan.clip_id}_cover_9_16.jpg"
+                cover_headline = pkg.suggested_on_screen_hook or plan.hook_headline
+                cov_meta = render_editorial_cover_9_16(
+                    video_or_img=out_mp4,
+                    headline=cover_headline,
+                    out_jpg=cover_9_16,
+                    clean_cover_jpg=cover_clean,
+                )
+                pkg.cover_timestamp_ms = int(cov_meta.get("cover_timestamp_ms") or 0)
+                pkg.cover_clean_path = str(cov_meta.get("cover_clean_path") or "")
+                pkg.cover_9_16_path = str(cov_meta.get("cover_path") or "")
+            except Exception as exc:
+                print(f"[COVER_WARN] {plan.clip_id}: cover generation skipped ({exc})")
+
+            if ab_variants >= 2:
+                alt_hook = (pkg.ab_hook_variants[0] if pkg.ab_hook_variants else pkg.suggested_on_screen_hook) or plan.hook_headline
+                var_b_mp4 = run_dir / f"{plan.clip_id}_variant_b_9_16.mp4"
+                try:
+                    render_ab_hook_variant(out_mp4, alt_hook, var_b_mp4, compute_profile=compute_profile)
+                    rendered.append(str(var_b_mp4))
+                except Exception as exc:
+                    print(f"[AB_VARIANT_WARN] {plan.clip_id}: Variant B skipped ({exc})")
+
             packages.append(pkg)
             pkg_json_str = pkg.model_dump_json(indent=2)
             (run_dir / f"{plan.clip_id}_packaging.json").write_text(pkg_json_str, encoding="utf-8")
-            print(f"[PACKAGING] {plan.clip_id}: title={pkg.shorts_title!r} tags={pkg.shorts_hashtags}")
+            print(
+                f"[PACKAGING] {plan.clip_id}: title={pkg.shorts_title!r} tags={pkg.shorts_hashtags} "
+                f"cover_ts_ms={pkg.cover_timestamp_ms}"
+            )
 
         cr = critic_map.get(plan.clip_id)
         upsert_clip(
@@ -154,7 +184,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         state = curate_run(run_dir, brief=args.brief)
 
     if state.edit_plans:
-        state = _render_and_verify(run_dir, state)
+        state = _render_and_verify(run_dir, state, ab_variants=args.ab_variants)
     else:
         print(f"[CLI] run_id={run_id} finished without approved clips (check slice_audits/critic_results).")
 
@@ -185,7 +215,7 @@ def cmd_curate(args: argparse.Namespace) -> int:
         transcribe_run(run_dir)
     state = curate_run(run_dir, brief=args.brief)
     if args.render and state.edit_plans:
-        state = _render_and_verify(run_dir, state)
+        state = _render_and_verify(run_dir, state, ab_variants=args.ab_variants)
     print(f"[CLI_CURATE] run_id={args.run_id} audits={len(state.slice_audits)} plans={len(state.edit_plans)}")
     return 0
 
@@ -276,6 +306,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
 
     init_db()
     out_dir = Path(args.out_dir)
+    thumb_src = Path(args.thumb_source) if args.thumb_source else None
     if args.clips:
         specs = [{"path": c, "label": f"Moment #{i}"} for i, c in enumerate(args.clips, start=1)]
         report = compile_longform_16_9(
@@ -283,6 +314,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
             out_dir=out_dir,
             title=args.title,
             thumbnail_headline=args.thumb_headline,
+            thumb_source=thumb_src,
         )
     else:
         report = compile_from_studio_db(
@@ -290,6 +322,45 @@ def cmd_compile(args: argparse.Namespace) -> int:
             streamer_id=args.streamer,
             max_clips=args.max_clips,
             title=args.title,
+            thumbnail_headline=args.thumb_headline,
+            thumb_source=thumb_src,
+        )
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_cover(args: argparse.Namespace) -> int:
+    """Standalone Method-C 9:16 editorial cover or native 16:9 YouTube thumbnail generator."""
+    from src.design_engine import render_editorial_cover_9_16, render_editorial_thumbnail_16_9
+
+    src_path = Path(args.video)
+    if not src_path.exists():
+        raise FileNotFoundError(f"Video or image not found: {src_path}")
+
+    webcam_box: tuple[int, int, int, int] | None = None
+    if args.webcam_box:
+        parts = [int(v.strip()) for v in args.webcam_box.split(",")]
+        if len(parts) != 4:
+            raise ValueError("--webcam-box must be 'x,y,w,h'")
+        webcam_box = (parts[0], parts[1], parts[2], parts[3])
+
+    if args.format == "16_9":
+        out_jpg = Path(args.out) if args.out else src_path.with_name("thumbnail_1280x720.jpg")
+        report = render_editorial_thumbnail_16_9(
+            video_or_img=src_path,
+            headline=args.headline,
+            out_jpg=out_jpg,
+            badge_text=args.badge,
+            webcam_box_px=webcam_box,
+        )
+    else:
+        out_jpg = Path(args.out) if args.out else src_path.with_name(f"{src_path.stem}_cover_9_16.jpg")
+        report = render_editorial_cover_9_16(
+            video_or_img=src_path,
+            headline=args.headline,
+            out_jpg=out_jpg,
+            badge_text=args.badge,
+            webcam_box_px=webcam_box,
         )
     print(json.dumps(report, indent=2, ensure_ascii=False))
     return 0
@@ -322,13 +393,47 @@ def cmd_analytics(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rag(args: argparse.Namespace) -> int:
+    """Rebuild or query the hybrid local RAG (FTS5 + sqlite-vec + fastembed) & read-only Omni-RAG v6 bridge."""
+    from src.rag_engine import format_rag_context, query_rag, rebuild_rag_index
+
+    init_db()
+    if args.rag_cmd == "rebuild":
+        stats = rebuild_rag_index(skip_vectors=bool(args.no_vectors))
+        print(json.dumps(stats, indent=2, ensure_ascii=False))
+        return 0
+    if args.rag_cmd == "query":
+        hits = query_rag(
+            args.text,
+            domain=args.domain,
+            top_k=args.top_k,
+            federated=bool(args.federated),
+            use_vectors=not bool(args.bm25_only),
+        )
+        payload = {
+            "query": args.text,
+            "domain": args.domain,
+            "federated": bool(args.federated),
+            "hit_count": len(hits),
+            "hits": hits,
+            "formatted_context": format_rag_context(hits, max_tokens=args.max_tokens),
+        }
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    return 1
+
+
 def cmd_doctor(_args: argparse.Namespace) -> int:
     """Audit environment, hardware headroom, assets, ONNX models, SQLite WAL, and secret presence (zero values)."""
     import shutil
 
+    import onnxruntime as ort
     from dotenv import load_dotenv
 
+    from src.design_engine import REMBG_HOME, find_headless_browser
     from src.miner import _ensure_media_path
+    from src.rag_engine import inspect_rag_status
+    from src.renderer import find_auto_editor_executable
 
     _ensure_media_path()
     load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=True)
@@ -355,6 +460,7 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
         or (Path.home() / ".deno" / "bin" / "deno.exe").exists()
         or (Path(os.getenv("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links" / "deno.exe").exists()
     )
+    browser_bin = find_headless_browser()
     bins = {
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "ffprobe": bool(shutil.which("ffprobe")),
@@ -362,7 +468,11 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
         "yt-dlp": (PROJECT_ROOT / ".venv" / "Scripts" / "yt-dlp.exe").exists() or bool(shutil.which("yt-dlp")),
         "TwitchDownloaderCLI": (PROJECT_ROOT / ".venv" / "Scripts" / "TwitchDownloaderCLI.exe").exists()
         or bool(shutil.which("TwitchDownloaderCLI")),
+        "auto-editor": find_auto_editor_executable() is not None,
+        "rtk": bool(shutil.which("rtk")),
+        "headless_browser": browser_bin.name if browser_bin else None,
     }
+    birefnet_files = list(REMBG_HOME.rglob("*birefnet-general-lite*.onnx")) if REMBG_HOME.exists() else []
     assets = {
         "montserrat_ttf": (PROJECT_ROOT / "assets" / "fonts" / "Montserrat-Black.ttf").exists(),
         "montserrat_ofl": (PROJECT_ROOT / "assets" / "fonts" / "OFL.txt").exists(),
@@ -371,13 +481,17 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
         "lr_asd_frontend": (PROJECT_ROOT / "models" / "lr-asd-frontend.onnx").exists(),
         "lr_asd_backend": (PROJECT_ROOT / "models" / "lr-asd-backend.onnx").exists(),
         "yamnet_onnx": (PROJECT_ROOT / "models" / "yamnet" / "yamnet.onnx").exists(),
+        "birefnet_general_lite_onnx": bool(birefnet_files),
+        "rtk_hooks_json": (PROJECT_ROOT / ".agents" / "hooks.json").is_file(),
     }
     report = {
         "hardware": snap,
         "heavy_local_allowed": {"allowed": allowed, "reason": reason},
         "storage": {"runs_mb": runs_mb, "quota_mb": 4096.0},
         "llm_budget_utc_day": {"spent_usd": daily_usd, "cap_usd": daily_cap},
+        "onnxruntime_version": ort.__version__,
         "sqlite": db_info,
+        "rag": inspect_rag_status(),
         "binaries": bins,
         "assets": assets,
         "env_keys": env_status,
@@ -387,7 +501,7 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Clipping Studio Orchestrator CLI (v2.5)")
+    parser = argparse.ArgumentParser(description="Clipping Studio Orchestrator CLI (v3.1)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_run = sub.add_parser("run", help="Execute resumable end-to-end 1080p pipeline")
@@ -396,6 +510,7 @@ def main() -> int:
     p_run.add_argument("--run-id", default=None)
     p_run.add_argument("--top-k", type=int, default=2)
     p_run.add_argument("--brief", default=None, help="Optional campaign brief matched against gta6_lore_index.json")
+    p_run.add_argument("--ab-variants", type=int, default=1, help="Set to 2 to also render Variant B (IG Trial Reels)")
     p_run.add_argument("--allow-short", action="store_true")
     p_run.add_argument("--allow-trailer", action="store_true")
     p_run.add_argument("--allow-720p", action="store_true")
@@ -407,6 +522,7 @@ def main() -> int:
     p_cur = sub.add_parser("curate", help="Re-run transcriber/curator/render on an existing run")
     p_cur.add_argument("--run-id", required=True)
     p_cur.add_argument("--brief", default=None)
+    p_cur.add_argument("--ab-variants", type=int, default=1)
     p_cur.add_argument("--retranscribe", action="store_true")
     p_cur.add_argument("--render", action="store_true")
     p_cur.set_defaults(func=cmd_curate)
@@ -450,7 +566,17 @@ def main() -> int:
     p_cp.add_argument("--max-clips", type=int, default=12)
     p_cp.add_argument("--title", default="Best GTA VI Moments Compilation")
     p_cp.add_argument("--thumb-headline", default="GTA VI CHAOS")
+    p_cp.add_argument("--thumb-source", default=None, help="Explicit native 16:9 slice MP4 for thumbnail generation")
     p_cp.set_defaults(func=cmd_compile)
+
+    p_cov = sub.add_parser("cover", help="Generate Method-C 9:16 editorial cover or native 16:9 YouTube thumbnail + QA artifacts")
+    p_cov.add_argument("--video", required=True, help="Source MP4 or image path")
+    p_cov.add_argument("--headline", required=True, help="2-4 word Curiosity-Gap headline")
+    p_cov.add_argument("--format", choices=["9_16", "16_9"], default="9_16")
+    p_cov.add_argument("--out", default=None, help="Optional output JPG path")
+    p_cov.add_argument("--badge", default="GTA VI", help="Optional micro-eyebrow badge text")
+    p_cov.add_argument("--webcam-box", default=None, help="Optional 'x,y,w,h' webcam pixel ROI on 16:9 slice")
+    p_cov.set_defaults(func=cmd_cover)
 
     p_an = sub.add_parser("analytics", help="Post-publish 5-network metrics & performance feedback loop")
     an_sub = p_an.add_subparsers(dest="analytics_cmd", required=True)
@@ -469,6 +595,19 @@ def main() -> int:
     an_log.add_argument("--hook-style", default="")
     an_sub.add_parser("summary", help="Summarize multi-network performance -> context/performance_feedback.json")
     p_an.set_defaults(func=cmd_analytics)
+
+    p_rag = sub.add_parser("rag", help="Rebuild or query hybrid local RAG (FTS5+sqlite-vec) & read-only Omni-RAG v6")
+    rag_sub = p_rag.add_subparsers(dest="rag_cmd", required=True)
+    rag_reb = rag_sub.add_parser("rebuild", help="Index all 6 knowledge gaps + episodic memory into runs/studio.db")
+    rag_reb.add_argument("--no-vectors", action="store_true", help="Rebuild FTS5 only without computing embeddings")
+    rag_q = rag_sub.add_parser("query", help="Run hybrid BM25+vec RRF query (optionally federated to Omni-RAG v6)")
+    rag_q.add_argument("text", help="Natural-language search query")
+    rag_q.add_argument("--domain", default=None, help="Filter local domain (design_ctr, gta6_streamers, episodic_memory, ...)")
+    rag_q.add_argument("--top-k", type=int, default=5)
+    rag_q.add_argument("--federated", action="store_true", help="Also query Omni-RAG v6 strictly in ?mode=ro&immutable=1")
+    rag_q.add_argument("--bm25-only", action="store_true", help="Skip vector query leg")
+    rag_q.add_argument("--max-tokens", type=int, default=550)
+    p_rag.set_defaults(func=cmd_rag)
 
     p_doc = sub.add_parser("doctor", help="Audit hardware, binaries, ONNX models, SQLite WAL, and env key presence")
     p_doc.set_defaults(func=cmd_doctor)

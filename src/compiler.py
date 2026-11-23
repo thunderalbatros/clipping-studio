@@ -1,19 +1,19 @@
-"""Owned-Channel YouTube Long-Form 16:9 Compiler (1920x1080, chapters, 1280x720 thumbnail, -14 LUFS)."""
+"""Owned-Channel YouTube Long-Form 16:9 Compiler (1920x1080, chapters, native 16:9 BiRefNet-lite editorial thumbnail, -14 LUFS)."""
 
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
-
-from src.db import DEFAULT_DB_PATH, insert_telemetry, list_approved_clips
+from src.db import DEFAULT_DB_PATH, init_db, insert_telemetry, list_approved_clips
+from src.design_engine import render_editorial_thumbnail_16_9
 from src.miner import PROJECT_ROOT
-from src.renderer import BUNDLED_FONT_PATH, probe_video_stream
+from src.renderer import probe_video_stream
 
 SFX_WHOOSH = PROJECT_ROOT / "assets" / "sfx" / "whoosh.wav"
 
@@ -25,29 +25,68 @@ def _fmt_chapter_ts(sec: float) -> str:
     return f"{hrs:02d}:{mins:02d}:{secs:02d}" if hrs else f"{mins:02d}:{secs:02d}"
 
 
-def _extract_best_frame(video_path: Path, out_png: Path) -> Path:
-    _, _, _, dur = probe_video_stream(video_path)
-    ts = max(0.5, min(dur * 0.4, max(0.5, dur - 1.0)))
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-ss",
-            f"{ts:.2f}",
-            "-i",
-            str(video_path),
-            "-frames:v",
-            "1",
-            str(out_png),
-        ],
-        capture_output=True,
-        check=True,
-        timeout=30,
-    )
-    return out_png
+def _resolve_native_16_9_thumb_source(
+    clip_specs: list[dict[str, Any]],
+    thumb_source: Path | None = None,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> tuple[Path, tuple[int, int, int, int] | None]:
+    """Resolve native 16:9 slice_*.mp4 + optional webcam_box_px (avoids vertical 9:16 pillarbox in thumbnails)."""
+    if thumb_source is not None and thumb_source.exists():
+        return thumb_source, None
+
+    # 1. Check clip_specs for an explicit horizontal source_slice or native 16:9 clip
+    for spec in clip_specs:
+        cand_slice = spec.get("source_slice_path")
+        if cand_slice and Path(str(cand_slice)).exists():
+            wb = spec.get("webcam_box_px")
+            return Path(str(cand_slice)), (tuple(wb) if wb and len(wb) == 4 else None)
+        p = Path(str(spec["path"]))
+        if p.exists():
+            w, h, _, _ = probe_video_stream(p)
+            if w > h:
+                return p, None
+
+    # 2. Look up matching native 16:9 slice in runs/studio.db (`slices.video_path`)
+    try:
+        init_db(db_path)
+        conn = sqlite3.connect(str(db_path), timeout=10.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                """
+                SELECT s.video_path, s.run_id, s.slice_id
+                FROM slices s
+                JOIN clips c ON c.run_id = s.run_id AND c.slice_id = s.slice_id
+                WHERE c.media_check_passed = 1 AND s.video_path != ''
+                ORDER BY c.critic_overall DESC, c.updated_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row and Path(str(row["video_path"])).exists():
+                slice_p = Path(str(row["video_path"]))
+                wb_px = _lookup_webcam_box_in_state(slice_p.parent / "state.json", str(row["slice_id"]))
+                return slice_p, wb_px
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    return Path(str(clip_specs[0]["path"])), None
+
+
+def _lookup_webcam_box_in_state(state_path: Path, slice_id: str) -> tuple[int, int, int, int] | None:
+    if not state_path.is_file():
+        return None
+    try:
+        st = json.loads(state_path.read_text(encoding="utf-8"))
+        for a in st.get("slice_audits") or []:
+            if a.get("slice_id") == slice_id and a.get("webcam_box_px"):
+                wb = a["webcam_box_px"]
+                if len(wb) == 4:
+                    return (int(wb[0]), int(wb[1]), int(wb[2]), int(wb[3]))
+    except Exception:
+        pass
+    return None
 
 
 def generate_youtube_thumbnail(
@@ -55,64 +94,16 @@ def generate_youtube_thumbnail(
     headline: str,
     out_jpg: Path,
     badge_text: str = "GTA VI",
-) -> Path:
-    """Generate a high-contrast 1280x720 (<2 MB) YouTube Long-Form thumbnail with Montserrat Black."""
-    out_jpg.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="yt_thumb_") as tmp:
-        raw_png = _extract_best_frame(source_video, Path(tmp) / "frame.png")
-        img = Image.open(raw_png).convert("RGB")
-        # Fit 1280x720 cleanly (if 9:16 input, center over blurred landscape canvas)
-        w, h = img.size
-        if h > w:
-            bg = img.resize((1280, 720), Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(18))
-            bg = ImageEnhance.Brightness(bg).enhance(0.45)
-            fg_h = 720
-            fg_w = int(w * (fg_h / h))
-            fg = img.resize((fg_w, fg_h), Image.Resampling.LANCZOS)
-            bg.paste(fg, ((1280 - fg_w) // 2, 0))
-            canvas = bg
-        else:
-            canvas = img.resize((1280, 720), Image.Resampling.LANCZOS)
-
-        canvas = ImageEnhance.Contrast(canvas).enhance(1.12)
-        canvas = ImageEnhance.Color(canvas).enhance(1.10)
-
-        # Dark bottom gradient band for legibility
-        overlay = Image.new("RGBA", (1280, 720), (0, 0, 0, 0))
-        odraw = ImageDraw.Draw(overlay)
-        for y in range(440, 720):
-            alpha = int(205 * ((y - 440) / 280.0))
-            odraw.line([(0, y), (1280, y)], fill=(8, 10, 14, alpha))
-
-        # Top-left badge pill
-        odraw.rounded_rectangle([(42, 36), (255, 102)], radius=16, fill=(255, 214, 0, 240))
-        composed = Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB")
-        draw = ImageDraw.Draw(composed)
-
-        font_path = str(BUNDLED_FONT_PATH) if BUNDLED_FONT_PATH.exists() else None
-        badge_font = ImageFont.truetype(font_path, 38) if font_path else ImageFont.load_default()
-        title_font = ImageFont.truetype(font_path, 86) if font_path else ImageFont.load_default()
-
-        draw.text((66, 48), badge_text.upper()[:12], font=badge_font, fill=(14, 14, 18))
-
-        clean_hl = " ".join(headline.upper().split()[:5])
-        bbox = draw.textbbox((0, 0), clean_hl, font=title_font, stroke_width=6)
-        tw = bbox[2] - bbox[0]
-        if tw > 1180 and font_path:
-            title_font = ImageFont.truetype(font_path, 66)
-            bbox = draw.textbbox((0, 0), clean_hl, font=title_font, stroke_width=5)
-            tw = bbox[2] - bbox[0]
-        tx = max(44, (1280 - tw) // 2)
-        draw.text(
-            (tx, 560),
-            clean_hl,
-            font=title_font,
-            fill=(255, 255, 255),
-            stroke_width=6,
-            stroke_fill=(0, 0, 0),
-        )
-        composed.save(out_jpg, format="JPEG", quality=92, optimize=True)
-    return out_jpg
+    webcam_box_px: tuple[int, int, int, int] | None = None,
+) -> dict[str, Any]:
+    """Generate an editorial 1280x720 YouTube Long-Form thumbnail via DesignEngine (BiRefNet-lite + Chrome Headless)."""
+    return render_editorial_thumbnail_16_9(
+        video_or_img=source_video,
+        headline=headline,
+        out_jpg=out_jpg,
+        badge_text=badge_text,
+        webcam_box_px=webcam_box_px,
+    )
 
 
 def _normalize_segment_16_9(src_mp4: Path, out_seg: Path, start_sec: float | None = None, end_sec: float | None = None) -> float:
@@ -172,6 +163,7 @@ def compile_longform_16_9(
     out_dir: Path,
     title: str = "Best GTA VI Moments Compilation",
     thumbnail_headline: str = "GTA VI CHAOS",
+    thumb_source: Path | None = None,
     db_path: Path = DEFAULT_DB_PATH,
 ) -> dict[str, Any]:
     """Compile a list of clip dicts (`path`, optional `label`/`start_trim`/`end_trim`) into 16:9 YouTube master."""
@@ -239,7 +231,13 @@ def compile_longform_16_9(
 
     chapter_lines = [f"{c['timestamp']} {c['label']}" for c in chapters]
     chapters_txt.write_text("\n".join(chapter_lines) + "\n", encoding="utf-8")
-    generate_youtube_thumbnail(Path(str(clip_specs[0]["path"])), thumbnail_headline, thumb_jpg)
+    resolved_thumb_src, resolved_cam = _resolve_native_16_9_thumb_source(clip_specs, thumb_source=thumb_source, db_path=db_path)
+    thumb_meta = generate_youtube_thumbnail(
+        resolved_thumb_src,
+        thumbnail_headline,
+        thumb_jpg,
+        webcam_box_px=resolved_cam,
+    )
 
     w, h, fps, final_dur = probe_video_stream(out_mp4)
     report: dict[str, Any] = {
@@ -247,6 +245,8 @@ def compile_longform_16_9(
         "title": title,
         "output_mp4": str(out_mp4),
         "thumbnail_jpg": str(thumb_jpg),
+        "thumbnail_source": str(resolved_thumb_src),
+        "thumbnail_meta": thumb_meta,
         "chapters_txt": str(chapters_txt),
         "width": w,
         "height": h,
@@ -265,6 +265,8 @@ def compile_from_studio_db(
     streamer_id: str | None = None,
     max_clips: int = 12,
     title: str = "Best GTA VI Moments Compilation",
+    thumbnail_headline: str = "GTA VI CHAOS",
+    thumb_source: Path | None = None,
     db_path: Path = DEFAULT_DB_PATH,
 ) -> dict[str, Any]:
     """Query media-check-approved clips from `runs/studio.db` and compile into a 16:9 YouTube master."""
@@ -276,4 +278,11 @@ def compile_from_studio_db(
             continue
         label = str(r.get("matched_lore_entity") or f"{r.get('streamer_id')} {r.get('clip_id')}")
         specs.append({"path": str(mp4), "label": label})
-    return compile_longform_16_9(specs, out_dir=out_dir, title=title, db_path=db_path)
+    return compile_longform_16_9(
+        specs,
+        out_dir=out_dir,
+        title=title,
+        thumbnail_headline=thumbnail_headline,
+        thumb_source=thumb_source,
+        db_path=db_path,
+    )
