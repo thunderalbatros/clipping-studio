@@ -1,0 +1,17 @@
+{
+  "rtk-shell-compressor": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "..\\.venv\\Scripts\\python.exe ..\\scripts\\rtk_pretool_hook.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

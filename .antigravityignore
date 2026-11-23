@@ -1,5 +1,5 @@
 # Antigravity IDE Indexer Ignore Rules — Clipping Studio
-# Excluye repositorios de referencia, secretos, entornos y medios pesados del indexado global.
+# Excluye repositorios de referencia, secretos, reportes históricos, entornos y medios pesados.
 
 # Secretos y credenciales
 .env
@@ -13,6 +13,21 @@
 
 # Repositorios de referencia (solo lectura, nunca indexar como codigo propio)
 _references/
+
+# Reportes históricos pesados (138+ KB ya destilados en biblias/RAG)
+docs/01_*.md
+docs/02_*.md
+docs/03_*.md
+docs/04_*.md
+docs/05_*.md
+
+# Locks, logs y caches de herramientas
+requirements.lock
+.pytest_cache/
+.ruff_cache/
+*.log
+*.db-wal
+*.db-shm
 
 # Ejecuciones y medios pesados
 runs/
