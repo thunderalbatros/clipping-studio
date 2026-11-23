@@ -16,6 +16,9 @@ SceneType = Literal[
 
 LayoutMode = Literal["split_webcam_top", "full_gameplay_9_16"]
 AudioPolicy = Literal["strict_clean", "sound_campaign", "keep_original"]
+CalloutMode = Literal["motion_overlay", "comedic_freeze"]
+CalloutSfx = Literal["whoosh", "pop", "hit", "none"]
+CreatorTier = Literal["radar_seed", "bounty_target", "client"]
 
 
 class WordTimestamp(BaseModel):
@@ -93,14 +96,18 @@ class AnnotatedTranscript(BaseModel):
 
 
 class FreezeFrameSpec(BaseModel):
-    """Single freeze-frame callout overlay specification (normalized 0..1000 box)."""
+    """Editorial callout specification (v3.5: non-freezing motion_overlay by default; comedic_freeze opt-in only)."""
 
     model_config = ConfigDict(extra="forbid")
 
     timestamp_sec: float = Field(ge=0.0)
-    box_2d: tuple[int, int, int, int]
+    box_2d: tuple[int, int, int, int] = (300, 200, 700, 800)
     callout_text: str = Field(max_length=32)
-    duration_sec: float = Field(default=0.8, gt=0.0, le=2.5)
+    duration_sec: float = Field(default=1.8, gt=0.0, le=3.5)
+    mode: CalloutMode = "motion_overlay"
+    sfx: CalloutSfx = "whoosh"
+    accent_color: str = "#FFD400"
+    eyebrow_text: str = ""
 
     @field_validator("callout_text")
     @classmethod
@@ -150,6 +157,10 @@ class EditPlan(BaseModel):
     source_url: str
     start_trim: float = Field(ge=0.0)
     end_trim: float = Field(gt=0.0)
+    start_word_idx: int | None = None
+    end_word_idx: int | None = None
+    post_word_tail_sec: float = Field(default=0.35, ge=0.0, le=12.0)
+    scene_blueprint_key: str | None = None
     scene_type: SceneType = "active_gameplay"
     visual_hook_score: float = Field(default=0.8, ge=0.0, le=1.0)
     hook_headline: str
@@ -282,3 +293,78 @@ class RunState(BaseModel):
     packaging: list[ClipPackaging] = Field(default_factory=list)
     disk_usage_mb: float = Field(default=0.0, ge=0.0)
     updated_at: str = ""
+
+
+class SceneReferenceItem(BaseModel):
+    """Single viral short-form reference deconstructed by Scene-Match Intelligence (v3.5)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    platform: str
+    source_id: str = ""
+    channel: str = ""
+    title: str
+    url: str
+    duration_sec: float = Field(default=0.0, ge=0.0)
+    views: int = Field(default=0, ge=0)
+    likes: int = Field(default=0, ge=0)
+    comments: int = Field(default=0, ge=0)
+    views_per_hour: float = Field(default=0.0, ge=0.0)
+    outlier_ratio: float = Field(default=1.0, ge=0.0)
+    cuts_count: int = Field(default=0, ge=0)
+    cuts_per_min: float = Field(default=0.0, ge=0.0)
+    avg_shot_len_sec: float = Field(default=0.0, ge=0.0)
+    first_cut_sec: float = Field(default=0.0, ge=0.0)
+    wpm: float = Field(default=0.0, ge=0.0)
+    opening_3s_lufs: float = -24.0
+    camera_position: str = "unknown"
+    camera_area_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    intro_0_3s: str = ""
+    outro_structure: str = ""
+    visual_composition: str = ""
+    transitions_and_effects: str = ""
+    caption_style: str = ""
+    comedy_tension_rhythm: str = ""
+    title_cover_technique: str = ""
+
+
+class SceneBlueprint(BaseModel):
+    """Actionable editing blueprint distilled from exact scene viral outliers or archetype fallback."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scene_key: str
+    game: str = "GTA VI"
+    scene_query: str
+    match_level: Literal["exact_scene_match", "archetype_fallback"] = "exact_scene_match"
+    cache_hit: bool = False
+    references: list[SceneReferenceItem] = Field(default_factory=list)
+    target_duration_range_sec: tuple[float, float] = (20.0, 36.0)
+    target_cuts_per_min: float = 15.0
+    target_avg_shot_len_sec: float = 3.5
+    recommended_first_cut_sec: float = 2.8
+    camera_placement_guide: str = "split_webcam_top (prominent facecam 36% top, centered gameplay 64% bottom)"
+    overlay_and_effects_guide: str = "animated motion_overlay Montserrat Black on live video (zero freeze) + 1.12x punch-in"
+    caption_and_rhythm_guide: str = "discrete 2-3 word Montserrat Black captions, hard post-climax cut <= 0.4s"
+    hook_0_3s_formula: str = "open mid-action/dialogue with zero preamble"
+    closing_outro_formula: str = "cut immediately after climax reaction for seamless loop"
+    summary_prompt: str = ""
+    created_at: str = ""
+
+
+class CreatorProfile(BaseModel):
+    """Persistent creator profile stored in runs/studio.db `creators` table (v3.5)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    creator_id: str
+    display_name: str
+    tier: CreatorTier = "bounty_target"
+    primary_platform: str = "twitch"
+    platforms: list[str] = Field(default_factory=lambda: ["twitch", "kick", "youtube"])
+    language: str = "en"
+    webcam_style: str = "auto_detect"
+    webcam_box: tuple[int, int, int, int] | None = None
+    style_notes: str = ""
+    auto_profiled: bool = False
+    dynamic_profile: bool = False

@@ -131,6 +131,34 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> Path:
                 heading,
                 content
             );
+
+            CREATE TABLE IF NOT EXISTS scene_blueprints (
+                scene_key TEXT PRIMARY KEY,
+                game TEXT NOT NULL,
+                scene_query TEXT NOT NULL,
+                match_level TEXT NOT NULL,
+                references_count INTEGER DEFAULT 0,
+                blueprint_json TEXT NOT NULL,
+                summary_prompt TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS creators (
+                creator_id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                tier TEXT NOT NULL DEFAULT 'bounty_target',
+                primary_platform TEXT DEFAULT 'twitch',
+                platforms_json TEXT DEFAULT '["twitch","kick","youtube"]',
+                language TEXT DEFAULT 'en',
+                webcam_style TEXT DEFAULT 'auto_detect',
+                webcam_box_json TEXT DEFAULT '',
+                style_notes TEXT DEFAULT '',
+                auto_profiled INTEGER DEFAULT 0,
+                profile_json TEXT DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         # Non-destructive column migrations for existing studio.db instances
@@ -661,6 +689,221 @@ def search_knowledge_fts(
         return [dict(r) for r in rows]
 
 
+def upsert_scene_blueprint(
+    scene_key: str,
+    game: str,
+    scene_query: str,
+    match_level: str,
+    references_count: int,
+    blueprint_json: str,
+    summary_prompt: str,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> None:
+    """Persist or update a reusable SceneBlueprint in SQLite `scene_blueprints`."""
+    init_db(db_path)
+    now = datetime.now(UTC).isoformat()
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO scene_blueprints (
+                scene_key, game, scene_query, match_level, references_count,
+                blueprint_json, summary_prompt, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scene_key) DO UPDATE SET
+                game = excluded.game,
+                scene_query = excluded.scene_query,
+                match_level = excluded.match_level,
+                references_count = excluded.references_count,
+                blueprint_json = excluded.blueprint_json,
+                summary_prompt = excluded.summary_prompt,
+                updated_at = excluded.updated_at
+            """,
+            (scene_key, game, scene_query, match_level, references_count, blueprint_json, summary_prompt, now, now),
+        )
+
+
+def get_scene_blueprint(scene_key: str, db_path: Path = DEFAULT_DB_PATH) -> dict[str, Any] | None:
+    """Retrieve a cached SceneBlueprint row by canonical `scene_key`."""
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM scene_blueprints WHERE scene_key = ?", (scene_key,)).fetchone()
+        return dict(row) if row else None
+
+
+def list_scene_blueprints(
+    game: str | None = None,
+    limit: int = 20,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> list[dict[str, Any]]:
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        if game:
+            rows = conn.execute(
+                "SELECT scene_key, game, scene_query, match_level, references_count, updated_at "
+                "FROM scene_blueprints WHERE LOWER(game) = LOWER(?) ORDER BY updated_at DESC LIMIT ?",
+                (game, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT scene_key, game, scene_query, match_level, references_count, updated_at "
+                "FROM scene_blueprints ORDER BY updated_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def upsert_creator(
+    creator_id: str,
+    display_name: str,
+    *,
+    tier: str = "bounty_target",
+    primary_platform: str = "twitch",
+    platforms: list[str] | None = None,
+    language: str = "en",
+    webcam_style: str = "auto_detect",
+    webcam_box: tuple[int, int, int, int] | list[int] | None = None,
+    style_notes: str = "",
+    auto_profiled: bool = False,
+    profile_extra: dict[str, Any] | None = None,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> dict[str, Any]:
+    """Persist or update a creator profile in SQLite `creators` table (radar_seed | bounty_target | client)."""
+    if tier not in {"radar_seed", "bounty_target", "client"}:
+        raise ValueError(f"Invalid creator tier: {tier!r}")
+    init_db(db_path)
+    cid = creator_id.strip().lower()
+    now = datetime.now(UTC).isoformat()
+    plats = list(platforms) if platforms else [primary_platform or "twitch"]
+    wb_json = json.dumps(list(webcam_box)) if webcam_box else ""
+    extra_json = json.dumps(profile_extra or {}, ensure_ascii=False)
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO creators (
+                creator_id, display_name, tier, primary_platform, platforms_json,
+                language, webcam_style, webcam_box_json, style_notes, auto_profiled,
+                profile_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(creator_id) DO UPDATE SET
+                display_name = CASE WHEN excluded.display_name != '' THEN excluded.display_name ELSE creators.display_name END,
+                tier = excluded.tier,
+                primary_platform = CASE WHEN excluded.primary_platform != '' THEN excluded.primary_platform ELSE creators.primary_platform END,
+                platforms_json = excluded.platforms_json,
+                language = excluded.language,
+                webcam_style = CASE WHEN excluded.webcam_style != '' THEN excluded.webcam_style ELSE creators.webcam_style END,
+                webcam_box_json = CASE WHEN excluded.webcam_box_json != '' THEN excluded.webcam_box_json ELSE creators.webcam_box_json END,
+                style_notes = CASE WHEN excluded.style_notes != '' THEN excluded.style_notes ELSE creators.style_notes END,
+                auto_profiled = MAX(creators.auto_profiled, excluded.auto_profiled),
+                profile_json = CASE WHEN excluded.profile_json != '{}' THEN excluded.profile_json ELSE creators.profile_json END,
+                updated_at = excluded.updated_at
+            """,
+            (
+                cid,
+                display_name.strip() or cid,
+                tier,
+                primary_platform,
+                json.dumps(plats),
+                language,
+                webcam_style,
+                wb_json,
+                style_notes,
+                int(auto_profiled),
+                extra_json,
+                now,
+                now,
+            ),
+        )
+    row = get_creator(cid, db_path=db_path)
+    assert row is not None
+    return row
+
+
+def _deserialize_creator_row(row: sqlite3.Row) -> dict[str, Any]:
+    d = dict(row)
+    try:
+        d["platforms"] = json.loads(d.get("platforms_json") or '["twitch"]')
+    except Exception:
+        d["platforms"] = ["twitch"]
+    wb_raw = str(d.get("webcam_box_json") or "").strip()
+    try:
+        wb_parsed = json.loads(wb_raw) if wb_raw else None
+        d["webcam_box"] = list(wb_parsed) if isinstance(wb_parsed, list) and len(wb_parsed) == 4 else None
+    except Exception:
+        d["webcam_box"] = None
+    try:
+        d["profile_extra"] = json.loads(d.get("profile_json") or "{}")
+    except Exception:
+        d["profile_extra"] = {}
+    d["auto_profiled"] = bool(d.get("auto_profiled"))
+    return d
+
+
+def get_creator(creator_id: str, db_path: Path = DEFAULT_DB_PATH) -> dict[str, Any] | None:
+    init_db(db_path)
+    cid = creator_id.strip().lower()
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM creators WHERE creator_id = ?", (cid,)).fetchone()
+        return _deserialize_creator_row(row) if row else None
+
+
+def list_creators(tier: str | None = None, db_path: Path = DEFAULT_DB_PATH) -> list[dict[str, Any]]:
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        if tier:
+            rows = conn.execute(
+                "SELECT * FROM creators WHERE tier = ? ORDER BY creator_id ASC",
+                (tier,),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM creators ORDER BY tier ASC, creator_id ASC").fetchall()
+        return [_deserialize_creator_row(r) for r in rows]
+
+
+def seed_creators_from_yaml(
+    yaml_path: Path | None = None,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> dict[str, int]:
+    """Idempotently seed `creators` table from config/streamers.yaml as `radar_seed` without overwriting custom entries."""
+    import yaml
+
+    init_db(db_path)
+    src_yaml = yaml_path or (PROJECT_ROOT / "config" / "streamers.yaml")
+    if not src_yaml.is_file():
+        return {"seeded": 0, "skipped": 0}
+    data = yaml.safe_load(src_yaml.read_text(encoding="utf-8")) or {}
+    streamers = dict(data.get("streamers") or {})
+    seeded, skipped = 0, 0
+    for sid, cfg in streamers.items():
+        cid = str(sid).strip().lower()
+        existing = get_creator(cid, db_path=db_path)
+        if existing is not None:
+            skipped += 1
+            continue
+        wb = cfg.get("webcam_box")
+        wb_tuple = [int(x) for x in wb] if isinstance(wb, list) and len(wb) == 4 else None
+        upsert_creator(
+            creator_id=cid,
+            display_name=str(cfg.get("display_name") or cid),
+            tier="radar_seed",
+            primary_platform=str(cfg.get("primary_platform") or "twitch"),
+            platforms=[str(p) for p in (cfg.get("platforms") or ["twitch"])],
+            language=str(cfg.get("language") or "en"),
+            webcam_style="preset_box" if wb_tuple else "auto_detect",
+            webcam_box=wb_tuple,
+            style_notes=str(cfg.get("notes") or ""),
+            auto_profiled=True,
+            profile_extra={
+                "kick_slug": cfg.get("kick_slug"),
+                "twitch_login": cfg.get("twitch_login"),
+                "youtube_channel_handle": cfg.get("youtube_channel_handle"),
+                "source_yaml_tier": cfg.get("tier"),
+            },
+            db_path=db_path,
+        )
+        seeded += 1
+    return {"seeded": seeded, "skipped": skipped}
+
+
 def inspect_db_summary(db_path: Path = DEFAULT_DB_PATH) -> dict[str, Any]:
     init_db(db_path)
     with _connect(db_path) as conn:
@@ -672,7 +915,17 @@ def inspect_db_summary(db_path: Path = DEFAULT_DB_PATH) -> dict[str, Any]:
             ).fetchall()
         ]
         counts: dict[str, int] = {}
-        for t in ("vods", "slices", "clips", "telemetry", "campaigns", "transcripts_fts", "knowledge_chunks"):
+        for t in (
+            "vods",
+            "slices",
+            "clips",
+            "telemetry",
+            "campaigns",
+            "transcripts_fts",
+            "knowledge_chunks",
+            "scene_blueprints",
+            "creators",
+        ):
             if t in tables:
                 counts[t] = int(conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0])
         return {"db_path": str(db_path), "journal_mode": journal_mode, "tables": tables, "counts": counts}

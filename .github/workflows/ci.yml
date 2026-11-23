@@ -1,0 +1,77 @@
+name: Clipping Studio CI Gate
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static-and-unit-gate:
+    name: Ruff, ty Ratchet, Pytest & Gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks secret scan
+        run: |
+          set -euo pipefail
+          GITLEAKS_VER="8.24.2"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VER}/gitleaks_${GITLEAKS_VER}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks detect --source . --no-banner --redact
+
+      - name: Setup uv and Python 3.12
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install lightweight CI dependencies (zero VOD downloads)
+        run: |
+          uv venv .venv --python 3.12
+          uv pip install --python .venv/bin/python \
+            "pydantic>=2.14.0" \
+            "pyyaml>=6.0.4" \
+            "python-dotenv>=1.2.0" \
+            "numpy>=2.5.0" \
+            "pillow>=13.0.0" \
+            "pysubs2>=1.9.1" \
+            "curl-cffi>=0.17.0" \
+            "requests>=2.34.0" \
+            "tenacity>=9.1.0" \
+            "websockets>=17.4" \
+            "sqlite-vec>=0.1.6" \
+            "onnxruntime==1.32.0" \
+            "scenedetect>=0.6.7" \
+            "opencv-python-headless>=4.11.0" \
+            "google-genai>=3.6.1" \
+            "openai>=3.57.0" \
+            "pytest>=8.3.0" \
+            "ruff>=0.17.0" \
+            "ty"
+
+      - name: Ruff lint check
+        run: .venv/bin/ruff check src/ evals/ tests/ scripts/
+
+      - name: ty static type check (v3.5 ratchet modules)
+        run: |
+          .venv/bin/ty check \
+            src/schemas.py \
+            src/callout.py \
+            src/renderer.py \
+            src/curator.py \
+            src/scene_researcher.py \
+            src/db.py \
+            src/miner.py \
+            src/cli.py
+
+      - name: Pytest unit test suite
+        run: .venv/bin/pytest tests/ -v

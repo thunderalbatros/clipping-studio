@@ -1,4 +1,4 @@
-"""Senior Studio 9:16 renderer: adaptive layout, safe-zone webcam anchor, selective jump-cuts, RMS punch-in zoom, 0-7s profanity bleeper, CC0 SFX, and 2-pass loudnorm (Fase A)."""
+"""Senior Studio 9:16 renderer (v3.5): adaptive ambient webcam layout, PySceneDetect cut-guard, alpha motion-graphics overlay, selective jump-cuts, RMS punch-in zoom, 0-7.5s profanity bleeper, CC0 SFX, voice clarity chain, 30ms loop fade, and 2-pass loudnorm."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import numpy as np
 import yaml
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-from src.callout import render_freeze_callout
+from src.callout import OVERLAY_DEFAULT_Y, render_editorial_callout
 from src.captions import generate_karaoke_ass, remap_time_through_segments
 from src.miner import (
     CHANNEL_PROFILE_PATH,
@@ -26,7 +26,7 @@ from src.miner import (
     probe_video_stream,
 )
 from src.resource_guard import apply_thread_budget
-from src.schemas import AnnotatedTranscript, EditPlan, WordTimestamp
+from src.schemas import AnnotatedTranscript, EditPlan, SceneBlueprint, WordTimestamp
 from src.speaker_guard import detect_face_center_ultraface, score_streamer_speech_asd
 
 _JSON_BLOCK_RE = re.compile(r"\{[^{}]*\"input_i\"[^{}]*\}", re.DOTALL)
@@ -34,6 +34,7 @@ _FONTSELECT_RE = re.compile(r"fontselect:\s*\(([^)]+)\)", re.IGNORECASE)
 _PROFANITY_RE = re.compile(r"\b(fuck\w*|shit\w*|bitch\w*|cunt\w*|nigg\w*|whore\w*|slut\w*|motherfuck\w*)\b", re.IGNORECASE)
 BUNDLED_FONT_PATH = PROJECT_ROOT / "assets" / "fonts" / "Montserrat-Black.ttf"
 SFX_DIR = PROJECT_ROOT / "assets" / "sfx"
+_VOICE_CLARITY_CHAIN = "highpass=f=80,acompressor=threshold=-20dB:ratio=2.2:attack=12:release=120:makeup=1.5"
 
 
 def _even(n: int) -> int:
@@ -449,6 +450,135 @@ def render_ab_hook_variant(
     return out_mp4
 
 
+def detect_scene_cuts_pyscenedetect(
+    source_slice: Path,
+    start_trim: float,
+    clip_dur: float,
+    threshold: float = 27.0,
+) -> list[float]:
+    """Detect hard scene cuts inside [start_trim .. start_trim+clip_dur] using PySceneDetect (BSD-3-Clause).
+
+    Returns clip-relative cut timestamps in seconds. Falls back cleanly to [] on synthetic/unreadable inputs.
+    """
+    if not source_slice.is_file() or clip_dur <= 0.5:
+        return []
+    try:
+        from scenedetect import ContentDetector, SceneManager, open_video
+
+        video = open_video(str(source_slice.resolve()))
+        if start_trim > 0.05:
+            video.seek(start_trim)
+        sm = SceneManager()
+        sm.add_detector(ContentDetector(threshold=threshold))
+        sm.detect_scenes(video=video, duration=clip_dur, frame_skip=1)
+        scene_list = sm.get_scene_list()
+        cuts: list[float] = []
+        for idx, (s_tc, _e_tc) in enumerate(scene_list):
+            if idx == 0:
+                continue
+            rel = round(float(s_tc.get_seconds()) - start_trim, 3)
+            if 0.15 < rel < clip_dur - 0.15:
+                cuts.append(rel)
+        return sorted(set(cuts))
+    except Exception:
+        return []
+
+
+def guard_windows_against_scene_cuts(
+    windows: list[tuple[float, float]],
+    scene_cuts: list[float] | None,
+    min_dur: float = 0.65,
+    margin_sec: float = 0.08,
+) -> list[tuple[float, float]]:
+    """Senior Rule (a): NEVER allow a pan or punch-in zoom window to cross a hard scene cut."""
+    if not windows or not scene_cuts:
+        return list(windows)
+
+    cuts = sorted(float(c) for c in scene_cuts)
+    safe_windows: list[tuple[float, float]] = []
+    for ws, we in windows:
+        crossing = [c for c in cuts if (ws - margin_sec) < c < (we + margin_sec)]
+        if not crossing:
+            if we - ws >= min_dur:
+                safe_windows.append((round(ws, 3), round(we, 3)))
+            continue
+
+        # Split [ws, we] across each hard cut keeping a margin on both sides and pick the longest valid shot segment
+        segments: list[tuple[float, float]] = []
+        cursor = ws
+        for c in crossing:
+            seg_end = min(we, c - margin_sec)
+            if seg_end - cursor >= min_dur:
+                segments.append((round(cursor, 3), round(seg_end, 3)))
+            cursor = max(cursor, c + margin_sec)
+        if we - cursor >= min_dur:
+            segments.append((round(cursor, 3), round(we, 3)))
+        if segments:
+            best_seg = max(segments, key=lambda s: s[1] - s[0])
+            safe_windows.append(best_seg)
+    return safe_windows
+
+
+def trim_post_climax_dead_tail(
+    kept_segments: list[tuple[float, float]],
+    pcm_16k: np.ndarray | None,
+    transcript: AnnotatedTranscript,
+    start_trim: float,
+    max_tail_sec: float = 0.40,
+    min_clip_sec: float = 15.0,
+    silence_db_thresh: float = -38.0,
+) -> list[tuple[float, float]]:
+    """Trim dead trailing acoustic silence (> max_tail_sec below -38 dBFS) at the end of the clip for crisp loops."""
+    if not kept_segments or pcm_16k is None or len(pcm_16k) < 3200:
+        return kept_segments
+
+    last_s, last_e = kept_segments[-1]
+    total_dur = sum(e - s for s, e in kept_segments)
+    if total_dur <= min_clip_sec + 0.3 or last_e - last_s <= 1.2:
+        return kept_segments
+
+    # Protect any streamer speech or non-verbal climax inside the final segment
+    speech_end_rel = 0.0
+    for w in transcript.words:
+        if not w.is_npc_or_other and w.end > start_trim:
+            rel_e = w.end - start_trim
+            if rel_e <= last_e:
+                speech_end_rel = max(speech_end_rel, rel_e)
+    for ev in transcript.non_verbal_events:
+        if ev.kind in {"shouting", "laughter", "visual_motion"} and ev.end > start_trim:
+            rel_e = ev.end - start_trim
+            if rel_e <= last_e:
+                speech_end_rel = max(speech_end_rel, rel_e)
+
+    # Scan backwards from last_e in 100ms blocks to find last active audio (> silence_db_thresh)
+    sr = 16000
+    step_s = 0.10
+    active_end_rel = speech_end_rel
+    t_cur = min(last_e, len(pcm_16k) / float(sr))
+    while t_cur > max(last_s + 0.5, speech_end_rel):
+        s_idx = max(0, int((t_cur - step_s) * sr))
+        e_idx = min(len(pcm_16k), int(t_cur * sr))
+        if e_idx <= s_idx:
+            break
+        seg = pcm_16k[s_idx:e_idx]
+        rms = float(np.sqrt(np.mean(seg * seg)) + 1e-9)
+        db = 20.0 * float(np.log10(rms))
+        if db > silence_db_thresh:
+            active_end_rel = max(active_end_rel, t_cur)
+            break
+        t_cur -= step_s
+
+    target_end = min(last_e, active_end_rel + max_tail_sec)
+    if last_e - target_end <= 0.15:
+        return kept_segments
+
+    min_allowed_end = max(last_s + 1.0, last_e - (total_dur - min_clip_sec))
+    new_last_e = round(max(min_allowed_end, target_end), 3)
+    if new_last_e >= last_e - 0.08:
+        return kept_segments
+    return [*kept_segments[:-1], (last_s, new_last_e)]
+
+
 def find_punch_in_windows(
     transcript: AnnotatedTranscript,
     start_trim: float,
@@ -456,8 +586,9 @@ def find_punch_in_windows(
     kept_segments: list[tuple[float, float]] | None,
     freeze_ts: float | None = None,
     max_windows: int = 2,
+    scene_cuts: list[float] | None = None,
 ) -> list[tuple[float, float]]:
-    """Select up to 2 short motivated 1.10x punch-in zoom windows on vocal/laughter peaks or freeze impact."""
+    """Select up to 2 short motivated 1.10x-1.15x punch-in zoom windows guarded strictly against PySceneDetect hard cuts."""
     cands: list[tuple[float, float, float]] = []
     for ev in transcript.non_verbal_events:
         if ev.kind not in {"shouting", "laughter"}:
@@ -471,15 +602,19 @@ def find_punch_in_windows(
             cands.append((ev.intensity, win_s, win_e))
 
     if freeze_ts is not None and 1.8 <= freeze_ts <= out_dur - 1.5:
-        win_s = round(max(1.0, freeze_ts - 1.3), 3)
-        win_e = round(min(out_dur - 0.4, freeze_ts + 0.15), 3)
+        win_s = round(max(1.0, freeze_ts - 1.25), 3)
+        win_e = round(min(out_dur - 0.4, freeze_ts + 0.35), 3)
         cands.append((0.95, win_s, win_e))
 
     cands.sort(key=lambda x: x[0], reverse=True)
     chosen: list[tuple[float, float]] = []
     for _, ws, we in cands:
-        if all(we + 3.0 < cs or ws > ce + 3.0 for cs, ce in chosen):
-            chosen.append((ws, we))
+        guarded = guard_windows_against_scene_cuts([(ws, we)], scene_cuts, min_dur=0.65, margin_sec=0.08)
+        if not guarded:
+            continue
+        gws, gwe = guarded[0]
+        if all(gwe + 3.0 < cs or gws > ce + 3.0 for cs, ce in chosen):
+            chosen.append((gws, gwe))
             if len(chosen) >= max_windows:
                 break
     chosen.sort(key=lambda x: x[0])
@@ -521,11 +656,16 @@ def compute_adaptive_layout(
     if face_box_norm is not None:
         fx1, fy1, fx2, fy2 = face_box_norm
         fcx = cam_x + round(((fx1 + fx2) * 0.5) * cam_w)
-        fcy = cam_y + round(((fy1 + fy2) * 0.5) * cam_h)
-        sub_w = _even(max(64, round(cam_w * 0.92)))
-        sub_h = _even(max(64, round(cam_h * 0.92)))
+        fy1_px = cam_y + round(fy1 * cam_h)
+        fh_px = max(32, round(max(0.18, fy2 - fy1) * cam_h))
+        # Commanding 16:9 / 1.72:1 widescreen face framing to eliminate narrow side margins while keeping full head & headphones
+        sub_w = _even(max(64, round(cam_w * 0.96)))
+        target_h = max(round(fh_px * 1.18), round(sub_w / 1.72))
+        sub_h = _even(min(cam_h, max(64, target_h)))
+        headroom = max(12, round(fh_px * 0.16))
+        desired_y = fy1_px - headroom
         cam_x = max(wx + inset, min(wx + ww - inset - sub_w, fcx - sub_w // 2)) & ~1
-        cam_y = max(wy + inset, min(wy + wh - inset - sub_h, fcy - sub_h // 2)) & ~1
+        cam_y = max(wy + inset, min(wy + wh - inset - sub_h, desired_y)) & ~1
         cam_w, cam_h = sub_w, sub_h
 
     if cam_w >= 540:
@@ -533,8 +673,8 @@ def compute_adaptive_layout(
         upscale = round(1080.0 / float(cam_w), 2)
         is_framed_card = False
     else:
-        # Cap height <= 496px so top edge starts cleanly below TikTok/Reels y=180 bar
-        scale = min(max_upscale, 620.0 / float(cam_w), 496.0 / float(cam_h))
+        # Cap height <= 496px (top edge starts at y >= 180 below TikTok/Reels bar) and expand width up to 920px (<= max_upscale)
+        scale = min(max_upscale, 920.0 / float(cam_w), 496.0 / float(cam_h))
         card_w = _even(round(cam_w * scale))
         card_h = _even(round(cam_h * scale))
         upscale = round(card_w / float(cam_w), 2)
@@ -625,8 +765,8 @@ def compute_adaptive_layout(
 
 
 def _create_webcam_card_assets(card_w: int, card_h: int, work_dir: Path) -> tuple[Path, Path]:
-    """Generate rounded alpha mask (card_w x card_h) and soft drop-shadow frame (1080 x 692) via Pillow."""
-    radius = 26
+    """Generate rounded alpha mask (card_w x card_h) and soft drop-shadow + radial studio vignette frame (1080 x 692)."""
+    radius = 24
     mask = Image.new("L", (card_w, card_h), 0)
     mdraw = ImageDraw.Draw(mask)
     mdraw.rounded_rectangle([0, 0, card_w - 1, card_h - 1], radius=radius, fill=255)
@@ -634,18 +774,30 @@ def _create_webcam_card_assets(card_w: int, card_h: int, work_dir: Path) -> tupl
     mask.save(mask_path, format="PNG")
 
     px, py = compute_webcam_card_pos(card_w, card_h)
+    # Subtle outer vignette over the ambient webcam backdrop (zero opacity inside the rounded card cutout)
+    yy, xx = np.mgrid[0:692, 0:1080]
+    dist = np.sqrt(((xx - 540.0) / 680.0) ** 2 + ((yy - 410.0) / 460.0) ** 2)
+    vig_a = np.clip((dist - 0.45) * 110.0, 0.0, 90.0).astype(np.uint8)
+    vig_arr = np.zeros((692, 1080, 4), dtype=np.uint8)
+    vig_arr[..., 0] = 6
+    vig_arr[..., 1] = 8
+    vig_arr[..., 2] = 14
+    vig_arr[..., 3] = vig_a
+    vignette_img = Image.fromarray(vig_arr, mode="RGBA")
+
     shadow = Image.new("RGBA", (1080, 692), (0, 0, 0, 0))
     sdraw = ImageDraw.Draw(shadow)
-    sdraw.rounded_rectangle([px - 4, py + 8, px + card_w + 4, py + card_h + 14], radius=radius + 4, fill=(0, 0, 0, 175))
-    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=16))
+    sdraw.rounded_rectangle([px - 5, py + 8, px + card_w + 5, py + card_h + 15], radius=radius + 4, fill=(0, 0, 0, 185))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=18))
+    combined = Image.alpha_composite(vignette_img, shadow)
 
     cut = Image.new("L", (1080, 692), 255)
     ImageDraw.Draw(cut).rounded_rectangle([px, py, px + card_w - 1, py + card_h - 1], radius=radius, fill=0)
-    r, g, b, a = shadow.split()
+    r, g, b, a = combined.split()
     a_masked = Image.composite(a, Image.new("L", (1080, 692), 0), cut)
     frame = Image.merge("RGBA", (r, g, b, a_masked))
     fdraw = ImageDraw.Draw(frame)
-    fdraw.rounded_rectangle([px, py, px + card_w - 1, py + card_h - 1], radius=radius, outline=(245, 248, 255, 165), width=4)
+    fdraw.rounded_rectangle([px, py, px + card_w - 1, py + card_h - 1], radius=radius, outline=(245, 248, 255, 175), width=4)
     fdraw.rectangle([0, 688, 1080, 692], fill=(10, 12, 16, 235))
     frame_path = work_dir / "cam_frame.png"
     frame.save(frame_path, format="PNG")
@@ -653,7 +805,7 @@ def _create_webcam_card_assets(card_w: int, card_h: int, work_dir: Path) -> tupl
 
 
 def _measure_loudnorm_pass1(source_slice: Path, start_trim: float, duration: float) -> dict[str, str]:
-    """Pass 1 loudnorm extraction returning measured_I, measured_TP, measured_LRA, measured_thresh, offset."""
+    """Pass 1 loudnorm extraction matching the v3.5 voice-clarity chain (highpass + gentle compressor)."""
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -665,7 +817,7 @@ def _measure_loudnorm_pass1(source_slice: Path, start_trim: float, duration: flo
         str(source_slice.resolve()),
         "-vn",
         "-af",
-        "highpass=f=70,loudnorm=I=-14.0:TP=-1.6:LRA=11.0:print_format=json",
+        f"{_VOICE_CLARITY_CHAIN},loudnorm=I=-14.0:TP=-1.6:LRA=11.0:print_format=json",
         "-f",
         "null",
         "-",
@@ -700,6 +852,8 @@ def _build_adaptive_filter(
     sfx_inputs: list[tuple[int, int, float]],
     out_dur: float,
     src_fps: float = 60.0,
+    callout_mode: str = "motion_overlay",
+    callout_y: int = OVERLAY_DEFAULT_Y,
 ) -> str:
     gx, gy, gw, gh = layout["gameplay_crop_px"]
     parts: list[str] = []
@@ -719,7 +873,7 @@ def _build_adaptive_filter(
         parts.append("[0:v]setpts=PTS-STARTPTS[vsrc]")
         parts.append("[0:a]asetpts=PTS-STARTPTS[asrc]")
 
-    # Step 2: Adaptive 9:16 video layout + optional motivated RMS punch-in zoom
+    # Step 2: Adaptive 9:16 video layout + optional motivated cut-guarded punch-in zoom
     if layout["layout_mode"] == "full_gameplay_9_16":
         if punch_windows and punch_zoom > 1.02:
             zw, zh = _even(round(gw / punch_zoom)), _even(round(gh / punch_zoom))
@@ -742,14 +896,17 @@ def _build_adaptive_filter(
         s_ptr = 0
         if layout["is_framed_card"]:
             px, py = compute_webcam_card_pos(card_w, card_h)
-            bg_fps = max(30, min(60, round(src_fps or 60.0)))
-            # Clean dark neutral studio backdrop matching source fps (zero blurred gameplay / ghost HUD bleed)
-            parts.append(f"color=c=0x0A0C12:s=1080x692:r={bg_fps}:d={out_dur + 2.0:.3f},format=yuv420p,setsar=1[top_bg]")
-            parts.append(
-                f"{split_labels[s_ptr]}crop={cw}:{ch}:{cx}:{cy},"
-                f"scale={card_w}:{card_h}:flags=lanczos,unsharp=3:3:0.35,format=rgba,setsar=1[cam_raw]"
-            )
+            # Split webcam into clean foreground card + subtle ambient studio backdrop (ZERO flat black void, ZERO gameplay bleed)
+            parts.append(f"{split_labels[s_ptr]}crop={cw}:{ch}:{cx}:{cy},split=2[cam_fg_src][cam_bg_src]")
             s_ptr += 1
+            parts.append(
+                "[cam_bg_src]scale=270:173:force_original_aspect_ratio=increase:flags=bilinear,"
+                "crop=270:173,boxblur=14:3,eq=brightness=-0.16:saturation=0.72:contrast=0.92,"
+                "scale=1080:692:flags=bilinear,format=yuv420p,setsar=1[top_bg]"
+            )
+            parts.append(
+                f"[cam_fg_src]scale={card_w}:{card_h}:flags=lanczos,unsharp=3:3:0.35,format=rgba,setsar=1[cam_raw]"
+            )
             parts.append(f"[{mask_idx}:v]format=gray[cmask];[cam_raw][cmask]alphamerge[cam_round]")
             parts.append(f"[top_bg][cam_round]overlay={px}:{py}:shortest=1[top_mid]")
             parts.append(f"[top_mid][{frame_idx}:v]overlay=0:0:shortest=1[top]")
@@ -774,19 +931,25 @@ def _build_adaptive_filter(
 
         parts.append("[top][bot]vstack=inputs=2[base]")
 
-    # Step 3: Freeze-frame callout + Montserrat Black subtitles
+    # Step 3: Motion-graphics alpha overlay over LIVE video (default) OR explicit opt-in comedic_freeze
     if has_callout:
         ff_end = ff_start + ff_dur
-        parts.append(
-            f"[{callout_idx}:v]trim=duration={ff_dur:.3f},setpts=PTS-STARTPTS+{ff_start:.3f}/TB[ff];"
-            f"[base][ff]overlay=0:0:enable='between(t,{ff_start:.3f},{ff_end:.3f})':eof_action=pass[ov]"
-        )
+        if callout_mode == "comedic_freeze":
+            parts.append(
+                f"[{callout_idx}:v]trim=duration={ff_dur:.3f},setpts=PTS-STARTPTS+{ff_start:.3f}/TB[ff];"
+                f"[base][ff]overlay=0:0:enable='between(t,{ff_start:.3f},{ff_end:.3f})':eof_action=pass[ov]"
+            )
+        else:
+            parts.append(
+                f"[{callout_idx}:v]format=rgba,setpts=PTS-STARTPTS+{ff_start:.3f}/TB[ov_mg];"
+                f"[base][ov_mg]overlay=0:{callout_y}:enable='between(t,{ff_start:.3f},{ff_end:.3f})':eof_action=pass[ov]"
+            )
     else:
         parts.append("[base]null[ov]")
 
     parts.append("[ov]ass=subs.ass:fontsdir=fonts,format=nv12[vout]")
 
-    # Step 4: Audio chain — opening 0..7.5s profanity bleeper + CC0 SFX mix + 2-pass loudnorm + alimiter
+    # Step 4: Audio chain — opening 0..7.5s profanity bleeper + CC0 SFX mix + voice clarity + 2-pass loudnorm + alimiter + 30ms loop out-fade
     cur_a = "[asrc]"
     mix_inputs: list[str] = []
     if bleep_spans:
@@ -815,15 +978,18 @@ def _build_adaptive_filter(
         parts.append(f"{all_mix}amix=inputs={1 + len(mix_inputs)}:duration=first:dropout_transition=0:normalize=0[amixed]")
         cur_a = "[amixed]"
 
+    fade_start = max(0.1, round(out_dur - 0.030, 3))
     if loud_stats["input_i"] == "-inf":
-        parts.append(f"{cur_a}aresample=48000[aout]")
+        parts.append(f"{cur_a}aresample=48000,afade=t=out:st={fade_start:.3f}:d=0.030[aout]")
     else:
         parts.append(
-            f"{cur_a}highpass=f=70,"
+            f"{cur_a}{_VOICE_CLARITY_CHAIN},"
             f"loudnorm=I=-14.0:TP=-1.6:LRA=11.0:linear=true:"
             f"measured_I={loud_stats['input_i']}:measured_TP={loud_stats['input_tp']}:"
             f"measured_LRA={loud_stats['input_lra']}:measured_thresh={loud_stats['input_thresh']}:"
-            f"offset={loud_stats['target_offset']},aresample=48000,alimiter=limit=0.80:level=false:attack=2:release=40[aout]"
+            f"offset={loud_stats['target_offset']},aresample=48000,"
+            f"alimiter=limit=0.80:level=false:attack=2:release=40,"
+            f"afade=t=out:st={fade_start:.3f}:d=0.030[aout]"
         )
     return ";".join(parts)
 
@@ -837,13 +1003,9 @@ def render_master_clip(
     use_auto_editor: bool = True,
     clean_cover_out: Path | None = None,
     enforce_speaker_guard: bool = True,
+    scene_blueprint: SceneBlueprint | None = None,
 ) -> Path:
-    """Render Senior-grade 1080x1920 H.264 clip (60fps, <=1.8x card, jump-cuts, punch-in zoom, bleeper, SFX, loudnorm).
-
-    When `clean_cover_out` is provided, extracts 8 pre-`libass` 9:16 frames from `[base]` BEFORE subtitle burn-in,
-    selects the sharpest/most expressive peak frame, and writes both `clean_cover_out` and `<stem>.meta.json`
-    so `DesignEngine` NEVER inherits burned captions.
-    """
+    """Render Senior-grade v3.5 1080x1920 H.264 clip (ambient webcam card, alpha motion overlay, PySceneDetect cut-guard, jump-cuts, 30ms fade, voice clarity, loudnorm)."""
     apply_thread_budget()
     cfg: dict[str, Any] = {}
     if CHANNEL_PROFILE_PATH.exists():
@@ -854,7 +1016,9 @@ def render_master_clip(
     auto_cleanup = bool((cfg.get("storage") or {}).get("auto_cleanup_temp", True))
     max_upscale = float(layout_cfg.get("max_webcam_upscale", 1.8))
     excl_pad = int(layout_cfg.get("webcam_exclusion_pad_px", 48))
-    punch_zoom = min(1.15, max(1.0, float(layout_cfg.get("rms_punch_in_max_zoom", 1.12))))
+    punch_zoom = min(1.15, max(1.10, float(layout_cfg.get("rms_punch_in_max_zoom", 1.12))))
+    if scene_blueprint is not None and "zoom" in scene_blueprint.overlay_and_effects_guide.lower():
+        punch_zoom = min(1.15, max(punch_zoom, 1.13))
     cut_silence_sec = float(clip_cfg.get("cut_silence_over_sec", 0.65))
     synchresis_sec = float(clip_cfg.get("preserve_synchresis_pause_sec", 0.25))
 
@@ -911,14 +1075,41 @@ def render_master_clip(
             cut_silence_over_sec=cut_silence_sec,
             preserve_pause_sec=synchresis_sec,
         )
+    kept_segments = trim_post_climax_dead_tail(
+        kept_segments=kept_segments,
+        pcm_16k=pcm_16k,
+        transcript=transcript,
+        start_trim=edit_plan.start_trim,
+        max_tail_sec=0.40,
+        min_clip_sec=15.0,
+    )
     out_dur = round(sum(e - s for s, e in kept_segments), 3)
+
+    # PySceneDetect hard scene cuts (remapped to output timeline) so zoom NEVER crosses a hard cut
+    raw_scene_cuts = detect_scene_cuts_pyscenedetect(source_slice, edit_plan.start_trim, raw_clip_dur)
+    mapped_scene_cuts = sorted(
+        {
+            mc
+            for c in raw_scene_cuts
+            if (mc := remap_time_through_segments(c, kept_segments)) is not None and 0.1 < mc < out_dur - 0.1
+        }
+    )
 
     ff_start = 0.0
     ff_dur = 0.0
+    callout_mode = "motion_overlay"
+    callout_y = OVERLAY_DEFAULT_Y
+    callout_meta: dict[str, Any] | None = None
     if edit_plan.freeze_frame is not None:
         mapped_ff = remap_time_through_segments(edit_plan.freeze_frame.timestamp_sec, kept_segments)
-        ff_start = round(max(1.0, min(out_dur - 1.2, mapped_ff if mapped_ff is not None else out_dur * 0.45)), 3)
-        ff_dur = edit_plan.freeze_frame.duration_sec
+        callout_mode = edit_plan.freeze_frame.mode
+        base_dur = (
+            min(1.0, max(0.5, float(edit_plan.freeze_frame.duration_sec)))
+            if callout_mode == "comedic_freeze"
+            else max(1.5, min(2.5, float(edit_plan.freeze_frame.duration_sec if edit_plan.freeze_frame.duration_sec >= 1.2 else 1.8)))
+        )
+        ff_dur = round(min(base_dur, max(0.8, out_dur - 2.0)), 3)
+        ff_start = round(max(1.0, min(out_dur - ff_dur - 0.4, mapped_ff if mapped_ff is not None else out_dur * 0.45)), 3)
 
     punch_windows = find_punch_in_windows(
         transcript,
@@ -926,6 +1117,7 @@ def render_master_clip(
         out_dur,
         kept_segments,
         freeze_ts=ff_start if ff_dur > 0 else None,
+        scene_cuts=mapped_scene_cuts,
     )
     bleep_spans = find_opening_profanity_spans(transcript.words, edit_plan.start_trim, kept_segments, shield_sec=7.5)
 
@@ -946,15 +1138,22 @@ def render_master_clip(
             captions_cfg=captions_cfg,
             kept_segments=kept_segments,
         )
-        callout_png = render_freeze_callout(source_slice, edit_plan, work_dir / "callout.png", layout=layout)
-        has_callout = callout_png is not None and callout_png.exists()
+        callout_meta = render_editorial_callout(source_slice, edit_plan, work_dir, layout=layout)
+        has_callout = callout_meta is not None and Path(callout_meta["path"]).is_file()
+        if callout_meta is not None:
+            callout_mode = str(callout_meta["mode"])
+            callout_y = int(callout_meta["overlay_y"])
+            ff_dur = float(callout_meta["duration_sec"])
 
         loud_stats = _measure_loudnorm_pass1(source_slice, edit_plan.start_trim, raw_clip_dur)
         print(
-            f"[RENDERER] layout={layout['layout_mode']} cam_upscale={layout['webcam_upscale_factor']}x "
-            f"no_overlap={layout['no_webcam_gameplay_overlap']} src_fps={src_fps} "
+            f"[RENDERER] layout={layout['layout_mode']} card={layout.get('webcam_card_size')} "
+            f"cam_upscale={layout['webcam_upscale_factor']}x no_overlap={layout['no_webcam_gameplay_overlap']} "
+            f"src_fps={src_fps} scene_cuts={len(mapped_scene_cuts)} punch_ins={len(punch_windows)} "
+            f"callout_mode={callout_mode if has_callout else 'none'} "
+            f"callout_engine={callout_meta.get('engine') if callout_meta else 'none'} "
             f"dead_air_engine={ae_info.get('provider') if ae_info.get('used') else 'pcm_fallback'} "
-            f"jump_segs={len(kept_segments)} punch_ins={len(punch_windows)} bleeps={len(bleep_spans)} "
+            f"jump_segs={len(kept_segments)} bleeps={len(bleep_spans)} "
             f"pass1_i={loud_stats['input_i']} tp={loud_stats['input_tp']}"
         )
 
@@ -973,8 +1172,12 @@ def render_master_clip(
         ]
         next_idx = 1
         callout_idx, mask_idx, frame_idx = -1, -1, -1
-        if has_callout:
-            base_cmd.extend(["-loop", "1", "-i", "callout.png"])
+        if has_callout and callout_meta is not None:
+            cpath = Path(callout_meta["path"])
+            if callout_mode == "comedic_freeze":
+                base_cmd.extend(["-loop", "1", "-i", cpath.name])
+            else:
+                base_cmd.extend(["-i", cpath.name])
             callout_idx = next_idx
             next_idx += 1
         if layout["is_framed_card"]:
@@ -987,20 +1190,34 @@ def render_master_clip(
             frame_idx = next_idx
             next_idx += 1
 
-        # Optional subtle CC0 SFX (hook pop at t=0.04s + whoosh on freeze-frame entry)
+        # Calibrated CC0 SFX (-14 to -18 dB relative to voice) entering 2 frames before callout text
         sfx_inputs: list[tuple[int, int, float]] = []
         pop_wav = SFX_DIR / "pop.wav"
         if pop_wav.exists():
             shutil.copy2(pop_wav, work_dir / "pop.wav")
             base_cmd.extend(["-i", "pop.wav"])
-            sfx_inputs.append((next_idx, 40, 0.09))
+            sfx_inputs.append((next_idx, 40, 0.13))
             next_idx += 1
-        whoosh_wav = SFX_DIR / "whoosh.wav"
-        if has_callout and whoosh_wav.exists() and ff_start >= 0.25:
-            shutil.copy2(whoosh_wav, work_dir / "whoosh.wav")
-            base_cmd.extend(["-i", "whoosh.wav"])
-            sfx_inputs.append((next_idx, max(0, round((ff_start - 0.14) * 1000)), 0.12))
-            next_idx += 1
+
+        if has_callout and callout_meta is not None and ff_start >= 0.15:
+            sfx_kind = str(callout_meta.get("sfx") or "whoosh")
+            sfx_map = {
+                "whoosh": ("whoosh.wav", 0.16),  # ~ -15.9 dB relative to voice
+                "pop": ("pop.wav", 0.15),  # ~ -16.5 dB relative to voice
+                "hit": ("impact_sub.wav", 0.18),  # ~ -14.9 dB relative to voice
+            }
+            if sfx_kind in sfx_map:
+                fname, gain = sfx_map[sfx_kind]
+                src_sfx = SFX_DIR / fname
+                if src_sfx.exists():
+                    work_sfx = work_dir / f"callout_{fname}"
+                    shutil.copy2(src_sfx, work_sfx)
+                    lead_frames = int(callout_meta.get("sfx_lead_frames") or 2)
+                    lead_sec = lead_frames / max(24.0, float(src_fps or 60.0))
+                    delay_ms = max(0, round((ff_start - lead_sec) * 1000.0))
+                    base_cmd.extend(["-i", work_sfx.name])
+                    sfx_inputs.append((next_idx, delay_ms, gain))
+                    next_idx += 1
 
         flt = _build_adaptive_filter(
             layout=layout,
@@ -1018,6 +1235,8 @@ def render_master_clip(
             sfx_inputs=sfx_inputs,
             out_dur=out_dur,
             src_fps=src_fps or 60.0,
+            callout_mode=callout_mode,
+            callout_y=callout_y,
         )
 
         base_cmd.extend([

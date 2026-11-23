@@ -28,7 +28,9 @@ from src.schemas import (
     EditPlan,
     FreezeFrameSpec,
     RunState,
+    SceneBlueprint,
     SliceAuditResult,
+    WordTimestamp,
 )
 from src.speaker_guard import score_streamer_speech_asd
 
@@ -55,8 +57,11 @@ class _Pass2TrimProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     clip_id: str
-    start_trim: float = Field(ge=0.0)
-    end_trim: float = Field(gt=0.0)
+    start_word_idx: int = Field(default=0, ge=0)
+    end_word_idx: int = Field(default=0, ge=0)
+    post_word_tail_sec: float = Field(default=0.35, ge=0.05, le=12.0)
+    start_trim: float | None = Field(default=None, ge=0.0)
+    end_trim: float | None = Field(default=None, gt=0.0)
     hook_headline: str
     freeze_frame: FreezeFrameSpec | None = None
     matched_trend_id: str | None = None
@@ -65,6 +70,64 @@ class _Pass2TrimProposal(BaseModel):
     dmca_risk_reason: str = ""
     self_contained_score: int = Field(ge=0, le=100)
     rationale: str
+
+
+def resolve_word_index_trim(
+    words: list[WordTimestamp],
+    start_word_idx: int,
+    end_word_idx: int,
+    max_dur: float,
+    *,
+    pre_pad_sec: float = 0.14,
+    post_tail_sec: float = 0.35,
+    min_start_sec: float = 0.0,
+    min_clip_sec: float = 16.0,
+    max_clip_sec: float = 55.0,
+) -> tuple[float, float, int, int]:
+    """Resolve LLM-chosen integer word indices into exact millisecond-grounded (start_trim, end_trim).
+
+    Eliminates mid-syllable cuts and LLM timestamp hallucinations (artbyjazi/autoclip pattern).
+    """
+    if not words:
+        s = round(min_start_sec, 3)
+        e = round(min(max_dur, max(s + min_clip_sec, min(max_dur, s + 30.0))), 3)
+        return s, e, 0, 0
+
+    n = len(words)
+    s_idx = max(0, min(n - 1, int(start_word_idx)))
+    e_idx = max(s_idx, min(n - 1, int(end_word_idx)))
+
+    # Advance past weak opening filler or NPC word so clip opens crisply on streamer action
+    for _ in range(4):
+        if s_idx >= e_idx:
+            break
+        w_cur = words[s_idx]
+        norm = re.sub(r"[^\w']", "", w_cur.word.lower())
+        if w_cur.is_npc_or_other or norm in _WEAK_OPENERS:
+            s_idx += 1
+        else:
+            break
+
+    raw_start = max(min_start_sec, words[s_idx].start - pre_pad_sec)
+    if s_idx > 0 and words[s_idx - 1].end < words[s_idx].start:
+        # Never clip the tail of the immediately preceding word
+        raw_start = max(raw_start, words[s_idx - 1].end + 0.01)
+    s_trim = round(min(max(min_start_sec, max_dur - 1.0), raw_start), 3)
+
+    tail = max(0.05, min(12.0, float(post_tail_sec)))
+    raw_end = min(max_dur, words[e_idx].end + tail)
+    if e_idx + 1 < n and tail <= 0.60 and words[e_idx + 1].start < raw_end:
+        # Avoid bleeding into the first syllable of the following word when using a tight post-dialogue cut
+        raw_end = max(words[e_idx].end + 0.04, words[e_idx + 1].start - 0.02)
+    e_trim = round(min(max_dur, max(s_trim + 0.5, raw_end)), 3)
+
+    # Enforce safe [min_clip_sec, max_clip_sec] window without cutting into a word mid-syllable
+    if e_trim - s_trim < min_clip_sec:
+        e_trim = round(min(max_dur, s_trim + min_clip_sec), 3)
+    if e_trim - s_trim > max_clip_sec:
+        e_trim = round(s_trim + max_clip_sec, 3)
+
+    return s_trim, e_trim, s_idx, e_idx
 
 
 def _probe_video_geometry(video_path: Path) -> tuple[int, int, float]:
@@ -484,8 +547,9 @@ def curate_pass2_slice(
     max_retries: int = 1,
     streamer_id: str = "",
     audio_policy: AudioPolicy = "strict_clean",
+    scene_blueprint: SceneBlueprint | None = None,
 ) -> tuple[EditPlan | None, BlindCriticResult]:
-    """Pass 2: Run LR-ASD speaker separation, 1fps zoom strip TrimRefiner, CHECKED BY CODE & Blind Critic."""
+    """Pass 2: Run LR-ASD speaker separation, word-index grounded TrimRefiner, SceneBlueprint injection, CHECKED BY CODE & Blind Critic."""
     video_path = Path(cand.slice_video_path)
     _, _, vdur = _probe_video_geometry(video_path)
 
@@ -504,14 +568,23 @@ def curate_pass2_slice(
     _extract_zoom_strip_1fps(video_path, audit.suggested_start_sec, zoom_span, zoom_png)
 
     word_lines = " ".join(
-        f"[{w.start:.2f}s{' NPC' if w.is_npc_or_other else ''}]{w.word}" for w in transcript.words
+        f"[#{idx:02d} {w.start:.2f}s{' NPC' if w.is_npc_or_other else ''}]{w.word}"
+        for idx, w in enumerate(transcript.words)
     )
     sys_refine = build_cached_system_instruction(
-        "You are Pass-2 Director & TrimRefiner. Pick exact 18s-45s trims opening directly on action/reaction, "
+        "You are Pass-2 Director & TrimRefiner. Select exact INTEGER word indices (start_word_idx, end_word_idx) "
+        "from the indexed transcript so Python resolves millisecond-exact boundaries with zero mid-syllable cuts, "
         "ZERO stream meta-talk (gifted subs/donations), a punchy <=10-word hook_headline, matched_lore_entity, "
-        "and 1 <=4-word FreezeFrameSpec at the comedic/action peak."
+        "and 1 animated motion_overlay callout (mode='motion_overlay', duration_sec 1.6-2.2s, NEVER freezing live video)."
     )
     brief_block = _match_brief_context(brief)
+    blueprint_block = ""
+    if scene_blueprint is not None:
+        from src.scene_researcher import format_blueprint_for_prompt
+
+        bp_txt = format_blueprint_for_prompt(scene_blueprint, max_tokens=300)
+        if bp_txt:
+            blueprint_block = f"SCENE-MATCH VIRAL REFERENCE BLUEPRINT (<=300 tokens):\n{bp_txt}\n\n"
     rag_ctx = ""
     try:
         rag_topic = f"{audit.hook_headline} {audit.matched_lore_entity or ''} {brief or ''} synchresis seamless loop"
@@ -529,16 +602,18 @@ def curate_pass2_slice(
         prompt = (
             f"Refine slice_id='{cand.slice_id}' into clip_id='clip_{cand.slice_id[-2:]}'.\n"
             f"{brief_block}"
+            f"{blueprint_block}"
             f"{rag_block}"
             f"Pass-1 window: {audit.suggested_start_sec:.2f}s -> {audit.suggested_end_sec:.2f}s (valid range {min_start:.1f}s..{vdur:.2f}s).\n"
             f"Scene type: {audit.scene_type}, YAMNet music_prob_peak={transcript.music_prob_peak}.\n"
-            f"Timed words (words marked NPC are game characters and will be hidden from subs):\n{word_lines}\n"
+            f"Indexed words ([#idx start_sec]word; words marked NPC are game characters and hidden from subs):\n{word_lines}\n"
             f"{feedback_note}\n"
             "Rules:\n"
-            "- Output 18s <= (end_trim - start_trim) <= 45s (<= 55s max).\n"
+            "- Pick exact integer `start_word_idx` and `end_word_idx` from the indexed words above (total 18s..45s, <=55s).\n"
+            "- Set `post_word_tail_sec`: use 0.25..0.40s for dialogue punchlines, or up to 9.0s ONLY if a silent visual climax (e.g. explosion/WASTED) plays right after the last spoken word.\n"
             "- Exclude ANY segment with sub thank-yous ('gifted', 'sub', 'donation', 'shoutout').\n"
             "- Never start on a weak filler ('um', 'uh', 'so', 'and').\n"
-            "- Include 1 peak freeze_frame (`callout_text` 1..4 words <= 24 chars, timestamp_sec relative to start_trim)."
+            "- Include 1 peak `freeze_frame` with `mode='motion_overlay'` (animated text over live moving video, ZERO freeze), `callout_text` 1..4 words <= 24 chars, `duration_sec` 1.6..2.2, `sfx` in ('whoosh','pop','hit')."
         )
         try:
             prop, _ = generate_structured(
@@ -557,10 +632,24 @@ def curate_pass2_slice(
                 media_resolution="MEDIA_RESOLUTION_HIGH",
             )
 
-        s_trim = max(min_start, min(max(min_start, vdur - 18.0), round(prop.start_trim, 2)))
-        e_trim = min(vdur, max(s_trim + 17.0, round(prop.end_trim, 2)))
-        if e_trim - s_trim > 55.0:
-            e_trim = round(s_trim + 45.0, 2)
+        s_word_idx: int | None = None
+        e_word_idx: int | None = None
+        if transcript.words and prop.end_word_idx >= prop.start_word_idx and prop.start_word_idx < len(transcript.words):
+            s_trim, e_trim, s_word_idx, e_word_idx = resolve_word_index_trim(
+                transcript.words,
+                start_word_idx=prop.start_word_idx,
+                end_word_idx=prop.end_word_idx,
+                max_dur=vdur,
+                post_tail_sec=prop.post_word_tail_sec,
+                min_start_sec=min_start,
+            )
+        else:
+            raw_s = prop.start_trim if prop.start_trim is not None else audit.suggested_start_sec
+            raw_e = prop.end_trim if prop.end_trim is not None else audit.suggested_end_sec
+            s_trim = max(min_start, min(max(min_start, vdur - 18.0), round(raw_s, 2)))
+            e_trim = min(vdur, max(s_trim + 17.0, round(raw_e, 2)))
+            if e_trim - s_trim > 55.0:
+                e_trim = round(s_trim + 45.0, 2)
 
         clip_d = e_trim - s_trim
         ff = prop.freeze_frame
@@ -568,17 +657,23 @@ def curate_pass2_slice(
             hl_words = [w for w in prop.hook_headline.strip().split() if w][:3]
             fb_text = " ".join(hl_words)[:28].strip() or "WAIT FOR IT"
             ff = FreezeFrameSpec(
-                timestamp_sec=round(max(2.0, min(clip_d - 2.0, clip_d * 0.45)), 2),
+                timestamp_sec=round(max(2.0, min(clip_d - 2.2, clip_d * 0.45)), 2),
                 box_2d=(300, 250, 750, 750),
                 callout_text=fb_text,
-                duration_sec=0.8,
+                duration_sec=1.8,
+                mode="motion_overlay",
+                sfx="whoosh",
             )
-        elif ff.timestamp_sec >= clip_d - 1.0 or ff.timestamp_sec < 1.0:
+        elif ff.timestamp_sec >= clip_d - 1.2 or ff.timestamp_sec < 1.0:
             ff = FreezeFrameSpec(
-                timestamp_sec=round(max(1.5, min(clip_d - 1.5, clip_d * 0.45)), 2),
+                timestamp_sec=round(max(1.5, min(clip_d - 2.0, clip_d * 0.45)), 2),
                 box_2d=ff.box_2d,
                 callout_text=ff.callout_text,
-                duration_sec=min(1.0, max(0.6, ff.duration_sec)),
+                duration_sec=min(2.5, max(1.5, ff.duration_sec)) if ff.mode == "motion_overlay" else min(1.0, max(0.6, ff.duration_sec)),
+                mode=ff.mode,
+                sfx=ff.sfx,
+                accent_color=ff.accent_color,
+                eyebrow_text=ff.eyebrow_text,
             )
 
         climax_ms = (
@@ -593,6 +688,10 @@ def curate_pass2_slice(
             source_url=cand.source_url,
             start_trim=s_trim,
             end_trim=e_trim,
+            start_word_idx=s_word_idx,
+            end_word_idx=e_word_idx,
+            post_word_tail_sec=prop.post_word_tail_sec,
+            scene_blueprint_key=scene_blueprint.scene_key if scene_blueprint is not None else None,
             scene_type=audit.scene_type,
             visual_hook_score=audit.visual_hook_score,
             hook_headline=prop.hook_headline,
@@ -702,6 +801,8 @@ def curate_run(
     run_dir: Path,
     brief: str | None = None,
     audio_policy: AudioPolicy | None = None,
+    scene_research: bool = False,
+    game: str = "GTA VI",
 ) -> RunState:
     """Run Pass-1 + LR-ASD + Pass-2 curation over all transcribed slices in runs/<run_id>/."""
     state_path = run_dir / "state.json"
@@ -757,6 +858,20 @@ def curate_run(
     for audit in approved_audits:
         cand = cand_map[audit.slice_id]
         tr = tr_map[audit.slice_id]
+        bp: SceneBlueprint | None = None
+        if scene_research:
+            try:
+                from src.scene_researcher import research_scene
+
+                bp = research_scene(
+                    scene_query=audit.hook_headline or brief or "",
+                    transcript=tr,
+                    game=game,
+                    lore_entity=audit.matched_lore_entity,
+                    max_refs=3,
+                )
+            except Exception as exc:
+                print(f"[SCENE_RESEARCH_WARN] {audit.slice_id}: skipped ({exc})")
         plan, critic = curate_pass2_slice(
             cand,
             tr,
@@ -767,6 +882,7 @@ def curate_run(
             max_retries=1,
             streamer_id=state.streamer_id,
             audio_policy=eff_policy,
+            scene_blueprint=bp,
         )
         critics.append(critic)
         print(

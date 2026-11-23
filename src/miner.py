@@ -20,7 +20,14 @@ import yaml
 from curl_cffi import requests as curl_requests
 from dotenv import load_dotenv
 
-from src.db import upsert_slice, upsert_vod
+from src.db import (
+    DEFAULT_DB_PATH,
+    get_creator,
+    seed_creators_from_yaml,
+    upsert_creator,
+    upsert_slice,
+    upsert_vod,
+)
 from src.schemas import CandidateSlice, RunState
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -126,30 +133,109 @@ def load_whitelist() -> dict[str, dict[str, Any]]:
     return dict(data.get("streamers") or {})
 
 
+def auto_profile_creator(
+    creator_id: str,
+    *,
+    source_url: str = "",
+    tier: str = "bounty_target",
+    language: str = "en",
+    webcam_style: str = "auto_detect",
+    style_notes: str = "",
+    db_path: Path = DEFAULT_DB_PATH,
+    persist: bool = True,
+) -> dict[str, Any]:
+    """Run one-time Auto-Profiler for any new bounty target or client creator and persist in `creators`."""
+    key = creator_id.strip().lower()
+    if persist:
+        existing = get_creator(key, db_path=db_path)
+        if existing is not None and existing.get("auto_profiled"):
+            existing["dynamic_profile"] = existing.get("tier") != "radar_seed"
+            existing["was_cached"] = True
+            return existing
+
+    inferred_plat = detect_platform(source_url) if source_url else "twitch"
+    primary_plat = inferred_plat if inferred_plat in {"twitch", "kick", "youtube"} else "twitch"
+    platforms = list(dict.fromkeys([primary_plat, "twitch", "kick", "youtube"]))
+    notes = (
+        style_notes.strip()
+        or f"Auto-profiled ({tier}) from {primary_plat}; webcam auto-detect via Gemini Vision + UltraFace."
+    )
+
+    if persist:
+        row = upsert_creator(
+            creator_id=key,
+            display_name=creator_id.strip() or key,
+            tier=tier,
+            primary_platform=primary_plat,
+            platforms=platforms,
+            language=language,
+            webcam_style=webcam_style,
+            style_notes=notes,
+            auto_profiled=True,
+            profile_extra={"hook_style": "high-energy reaction", "first_source_url": source_url},
+            db_path=db_path,
+        )
+        row["dynamic_profile"] = row.get("tier") != "radar_seed"
+        row["was_cached"] = False
+        print(f"[AUTO_PROFILER] persisted 1-time creator profile '{key}' (tier={tier}, platform={primary_plat})")
+        return row
+
+    return {
+        "creator_id": key,
+        "display_name": creator_id.strip() or "creator",
+        "tier": tier,
+        "primary_platform": primary_plat,
+        "platforms": platforms,
+        "language": language,
+        "webcam_style": webcam_style,
+        "webcam_box": None,
+        "style_notes": notes,
+        "auto_profiled": True,
+        "dynamic_profile": True,
+        "was_cached": False,
+        "hook_style": "high-energy reaction",
+    }
+
+
 def validate_streamer_whitelist(
     streamer_id: str,
     allow_unlisted: bool = True,
     strict: bool = False,
+    *,
+    source_url: str = "",
+    tier: str = "bounty_target",
+    db_path: Path = DEFAULT_DB_PATH,
+    persist_new: bool = False,
 ) -> dict[str, Any]:
-    """Return configured streamer profile or a clean dynamic base profile for arbitrary bounty creators."""
-    wl = load_whitelist()
+    """Resolve creator from SQLite `creators` (seeded from config/streamers.yaml) or run 1-time Auto-Profiler."""
     key = streamer_id.strip().lower()
+    if persist_new:
+        seed_creators_from_yaml(STREAMERS_PATH, db_path=db_path)
+
+    if db_path.exists():
+        existing = get_creator(key, db_path=db_path)
+        if existing is not None:
+            existing["dynamic_profile"] = existing.get("tier") != "radar_seed"
+            return existing
+
+    wl = load_whitelist()
     if key in wl:
         return wl[key]
+
     if strict and not allow_unlisted:
         raise ValueError(
-            f"Streamer '{streamer_id}' is not in config/streamers.yaml whitelist "
-            f"(allowed: {sorted(wl.keys())}; pass --allow-unlisted to override)."
+            f"Streamer '{streamer_id}' is not in config/streamers.yaml or studio.db creators "
+            f"(allowed seeds: {sorted(wl.keys())}; pass --allow-unlisted to auto-profile)."
         )
+
     print(f"[MINER] dynamic base profile activated for unlisted creator '{streamer_id}'")
-    return {
-        "display_name": streamer_id.strip() or "creator",
-        "platforms": ["twitch", "kick", "youtube"],
-        "language": "en",
-        "dynamic_profile": True,
-        "webcam_box": None,
-        "hook_style": "high-energy reaction",
-    }
+    return auto_profile_creator(
+        streamer_id,
+        source_url=source_url,
+        tier=tier,
+        db_path=db_path,
+        persist=persist_new,
+    )
 
 
 def detect_platform(url: str) -> Literal["youtube", "twitch", "kick", "local"]:
@@ -794,7 +880,7 @@ def mine_vod_slices(
     """Mine candidate 1080p slices from Twitch, Kick, or YouTube Live VODs without downloading full VODs."""
     load_dotenv(override=True)
     _ensure_media_path()
-    validate_streamer_whitelist(streamer_id, allow_unlisted=allow_unlisted)
+    validate_streamer_whitelist(streamer_id, allow_unlisted=allow_unlisted, source_url=url, persist_new=True)
 
     rid = run_id or datetime.now(UTC).strftime("run_%Y%m%d_%H%M%S")
     run_dir = RUNS_DIR / rid

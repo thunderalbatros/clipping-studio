@@ -13,15 +13,20 @@ from evals.media_check import evaluate_video
 from src.curator import curate_run, generate_clip_packaging
 from src.db import (
     get_daily_llm_spend_usd,
+    get_scene_blueprint,
     init_db,
     insert_telemetry,
     inspect_db_summary,
+    list_creators,
+    list_scene_blueprints,
+    seed_creators_from_yaml,
     upsert_clip,
     upsert_vod,
 )
 from src.miner import (
     PROJECT_ROOT,
     RUNS_DIR,
+    auto_profile_creator,
     detect_platform,
     enforce_runs_quota,
     mine_vod_slices,
@@ -29,7 +34,7 @@ from src.miner import (
 )
 from src.renderer import render_ab_hook_variant, render_master_clip
 from src.resource_guard import heavy_local_allowed
-from src.schemas import ClipPackaging, RunState
+from src.schemas import ClipPackaging, RunState, SceneBlueprint
 from src.transcriber import transcribe_run
 from src.trends import run_trends_radar
 
@@ -59,6 +64,14 @@ def _render_and_verify(run_dir: Path, state: RunState, ab_variants: int = 1) -> 
         tr = tr_map[plan.slice_id]
         out_mp4 = run_dir / f"{plan.clip_id}_master_9_16.mp4"
         cover_clean_pre_ass = run_dir / f"{plan.clip_id}_cover_clean.jpg"
+        bp_obj: SceneBlueprint | None = None
+        if plan.scene_blueprint_key:
+            cached_bp = get_scene_blueprint(plan.scene_blueprint_key)
+            if cached_bp is not None:
+                try:
+                    bp_obj = SceneBlueprint.model_validate_json(str(cached_bp["blueprint_json"]))
+                except Exception:
+                    bp_obj = None
         render_master_clip(
             Path(cand.slice_video_path),
             plan,
@@ -67,6 +80,7 @@ def _render_and_verify(run_dir: Path, state: RunState, ab_variants: int = 1) -> 
             compute_profile=compute_profile,
             clean_cover_out=cover_clean_pre_ass,
             enforce_speaker_guard=True,
+            scene_blueprint=bp_obj,
         )
 
         qa_dir = run_dir / f"{plan.clip_id}_qa_frames"
@@ -199,7 +213,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         state = transcribe_run(run_dir, audio_policy=args.audio_policy)
 
     if cur_stage < 3:
-        state = curate_run(run_dir, brief=args.brief, audio_policy=args.audio_policy)
+        state = curate_run(
+            run_dir,
+            brief=args.brief,
+            audio_policy=args.audio_policy,
+            scene_research=bool(getattr(args, "scene_research", False)),
+            game=str(getattr(args, "game", "GTA VI") or "GTA VI"),
+        )
 
     if state.edit_plans:
         state = _render_and_verify(run_dir, state, ab_variants=args.ab_variants)
@@ -231,7 +251,13 @@ def cmd_curate(args: argparse.Namespace) -> int:
     run_dir = RUNS_DIR / args.run_id
     if args.retranscribe:
         transcribe_run(run_dir, audio_policy=args.audio_policy)
-    state = curate_run(run_dir, brief=args.brief, audio_policy=args.audio_policy)
+    state = curate_run(
+        run_dir,
+        brief=args.brief,
+        audio_policy=args.audio_policy,
+        scene_research=bool(getattr(args, "scene_research", False)),
+        game=str(getattr(args, "game", "GTA VI") or "GTA VI"),
+    )
     if args.render and state.edit_plans:
         state = _render_and_verify(run_dir, state, ab_variants=args.ab_variants)
     print(f"[CLI_CURATE] run_id={args.run_id} audits={len(state.slice_audits)} plans={len(state.edit_plans)} audio_policy={state.audio_policy}")
@@ -474,6 +500,55 @@ def cmd_rag(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_research(args: argparse.Namespace) -> int:
+    """Run 2-Level Scene-Match Intelligence (YouTube Shorts + Kick Clips -> SQLite scene_blueprints)."""
+    from src.scene_researcher import research_scene
+
+    init_db()
+    if args.list_cache:
+        rows = list_scene_blueprints(game=args.game if args.game_filter else None, limit=args.limit)
+        print(json.dumps({"count": len(rows), "blueprints": rows}, indent=2, ensure_ascii=False))
+        return 0
+    if not args.query:
+        raise SystemExit("--query is required unless --list-cache is set")
+    bp = research_scene(
+        scene_query=args.query,
+        game=args.game,
+        lore_entity=args.lore,
+        max_refs=args.max_refs,
+        force_refresh=bool(args.force),
+        use_multimodal=not bool(args.no_multimodal),
+    )
+    print(bp.model_dump_json(indent=2))
+    return 0
+
+
+def cmd_creators(args: argparse.Namespace) -> int:
+    """Manage dynamic `creators` table (seed from streamers.yaml, list, or auto-profile new client/bounty creator)."""
+    init_db()
+    if args.creators_cmd == "seed":
+        res = seed_creators_from_yaml()
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return 0
+    if args.creators_cmd == "list":
+        rows = list_creators(tier=args.tier)
+        print(json.dumps({"count": len(rows), "creators": rows}, indent=2, ensure_ascii=False))
+        return 0
+    if args.creators_cmd == "profile":
+        rec = auto_profile_creator(
+            args.creator_id,
+            source_url=args.url,
+            tier=args.tier,
+            language=args.language,
+            webcam_style=args.webcam_style,
+            style_notes=args.notes,
+            persist=True,
+        )
+        print(json.dumps(rec, indent=2, ensure_ascii=False))
+        return 0
+    return 1
+
+
 def cmd_doctor(_args: argparse.Namespace) -> int:
     """Audit environment, hardware headroom, assets, ONNX models, SQLite WAL, and secret presence (zero values)."""
     import shutil
@@ -566,6 +641,8 @@ def main() -> int:
         help="3-mode YAMNet audio policy (strict_clean | sound_campaign | keep_original)",
     )
     p_run.add_argument("--ab-variants", type=int, default=1, help="Set to 2 to also render Variant B (IG Trial Reels)")
+    p_run.add_argument("--scene-research", action="store_true", help="Run Scene-Match Intelligence before Pass-2 editing")
+    p_run.add_argument("--game", default="GTA VI", help="Game/niche context for Scene-Match Intelligence")
     p_run.add_argument("--allow-short", action="store_true")
     p_run.add_argument("--allow-trailer", action="store_true")
     p_run.add_argument("--allow-720p", action="store_true")
@@ -583,6 +660,8 @@ def main() -> int:
         default="strict_clean",
     )
     p_cur.add_argument("--ab-variants", type=int, default=1)
+    p_cur.add_argument("--scene-research", action="store_true")
+    p_cur.add_argument("--game", default="GTA VI")
     p_cur.add_argument("--retranscribe", action="store_true")
     p_cur.add_argument("--render", action="store_true")
     p_cur.set_defaults(func=cmd_curate)
@@ -697,6 +776,32 @@ def main() -> int:
     rag_q.add_argument("--bm25-only", action="store_true", help="Skip vector query leg")
     rag_q.add_argument("--max-tokens", type=int, default=550)
     p_rag.set_defaults(func=cmd_rag)
+
+    p_res = sub.add_parser("research", help="Scene-Match Intelligence: research viral references for an exact scene")
+    p_res.add_argument("--query", default="", help="Exact scene/mission description (e.g. 'Destroy Donnie car gas can explosion')")
+    p_res.add_argument("--game", default="GTA VI", help="Game, niche, or campaign context (e.g. 'GTA VI', 'GTA IV', 'podcast')")
+    p_res.add_argument("--lore", default=None, help="Optional lore entity or character name")
+    p_res.add_argument("--max-refs", type=int, default=3, help="Max viral references to deconstruct (3-5)")
+    p_res.add_argument("--force", action="store_true", help="Bypass SQLite scene_blueprints cache")
+    p_res.add_argument("--no-multimodal", action="store_true", help="Skip Gemini 3.8 Flash contact-strip audit")
+    p_res.add_argument("--list-cache", action="store_true", help="List cached blueprints in runs/studio.db")
+    p_res.add_argument("--game-filter", action="store_true", help="Filter --list-cache by --game")
+    p_res.add_argument("--limit", type=int, default=20)
+    p_res.set_defaults(func=cmd_research)
+
+    p_cr = sub.add_parser("creators", help="Manage persistent `creators` table (radar_seed | bounty_target | client)")
+    cr_sub = p_cr.add_subparsers(dest="creators_cmd", required=True)
+    cr_sub.add_parser("seed", help="Idempotently seed creators from config/streamers.yaml as radar_seed")
+    cr_list = cr_sub.add_parser("list", help="List persisted creator profiles")
+    cr_list.add_argument("--tier", default=None, choices=["radar_seed", "bounty_target", "client"])
+    cr_prof = cr_sub.add_parser("profile", help="Run 1-time Auto-Profiler for a new bounty_target or client creator")
+    cr_prof.add_argument("--creator-id", required=True)
+    cr_prof.add_argument("--url", default="")
+    cr_prof.add_argument("--tier", default="bounty_target", choices=["radar_seed", "bounty_target", "client"])
+    cr_prof.add_argument("--language", default="en")
+    cr_prof.add_argument("--webcam-style", default="auto_detect")
+    cr_prof.add_argument("--notes", default="")
+    p_cr.set_defaults(func=cmd_creators)
 
     p_doc = sub.add_parser("doctor", help="Audit hardware, binaries, ONNX models, SQLite WAL, and env key presence")
     p_doc.set_defaults(func=cmd_doctor)
