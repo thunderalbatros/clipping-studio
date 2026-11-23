@@ -187,6 +187,11 @@ class ClipPackaging(BaseModel):
     x_post_text: str = ""
     matched_lore_entity: str | None = None
     bounty_safe: bool = True
+    cover_timestamp_ms: int = 0
+    cover_clean_path: str = ""
+    cover_9_16_path: str = ""
+    ab_hook_variants: list[str] = Field(default_factory=list)
+    author_reply_seed: str = ""
 
     @field_validator("x_post_text")
     @classmethod

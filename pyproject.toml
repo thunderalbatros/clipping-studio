@@ -1,12 +1,14 @@
 [project]
 name = "clipping-studio"
-version = "2.5.0"
-description = "Automated Senior-grade 9:16 & 16:9 viral clipping studio (anti-AI slop, 1080p60, LR-ASD, YAMNet ONNX, Live Sniper)"
+version = "3.1.0"
+description = "Automated Senior-grade 9:16 & 16:9 viral clipping studio (anti-AI slop, 1080p60, LR-ASD, YAMNet ONNX, Federated RAG, DesignEngine)"
 requires-python = ">=3.12"
 dependencies = [
+    "auto-editor>=29.0.0",
     "curl-cffi>=0.17.0",
+    "fastembed>=0.9.0",
     "google-genai>=3.6.1",
-    "huggingface-hub>=2.4.0",
+    "huggingface-hub>=1.30.0",
     "numpy>=2.5.0",
     "onnx-asr>=0.12.0",
     "onnxruntime>=1.32.0",
@@ -16,7 +18,9 @@ dependencies = [
     "pysubs2>=1.9.1",
     "python-dotenv>=1.2.0",
     "pyyaml>=6.0.4",
+    "rembg>=2.0.80",
     "requests>=2.34.0",
+    "sqlite-vec>=0.1.6",
     "tenacity>=9.1.0",
     "websockets>=17.4",
     "yt-dlp>=2026.10.26",

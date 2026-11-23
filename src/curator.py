@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from src.db import upsert_slice, upsert_transcript_fts
 from src.llm_router import build_cached_system_instruction, generate_structured
 from src.miner import CHANNEL_PROFILE_PATH, PROJECT_ROOT, STREAMERS_PATH
+from src.rag_engine import build_curator_rag_context
 from src.schemas import (
     AnnotatedTranscript,
     BlindCriticResult,
@@ -415,6 +416,7 @@ def curate_pass2_slice(
     voice_mode: str = "none",
     brief: str | None = None,
     max_retries: int = 1,
+    streamer_id: str = "",
 ) -> tuple[EditPlan | None, BlindCriticResult]:
     """Pass 2: Run LR-ASD speaker separation, 1fps zoom strip TrimRefiner, CHECKED BY CODE & Blind Critic."""
     video_path = Path(cand.slice_video_path)
@@ -443,6 +445,13 @@ def curate_pass2_slice(
         "and 1 <=4-word FreezeFrameSpec at the comedic/action peak."
     )
     brief_block = _match_brief_context(brief)
+    rag_ctx = ""
+    try:
+        rag_topic = f"{audit.hook_headline} {audit.matched_lore_entity or ''} {brief or ''} synchresis seamless loop"
+        rag_ctx = build_curator_rag_context(streamer_id=streamer_id or "gta6", topic_query=rag_topic, stage="pass2", max_tokens=550)
+    except Exception:
+        rag_ctx = ""
+    rag_block = f"RETRIEVED STUDIO RAG CONTEXT (<=550 tokens):\n{rag_ctx}\n\n" if rag_ctx else ""
     min_start = 1.0 if (cand.platform == "kick" and cand.signal_source == "kick_clips_rank" and vdur >= 24.0) else 0.0
 
     feedback_note = ""
@@ -453,6 +462,7 @@ def curate_pass2_slice(
         prompt = (
             f"Refine slice_id='{cand.slice_id}' into clip_id='clip_{cand.slice_id[-2:]}'.\n"
             f"{brief_block}"
+            f"{rag_block}"
             f"Pass-1 window: {audit.suggested_start_sec:.2f}s -> {audit.suggested_end_sec:.2f}s (valid range {min_start:.1f}s..{vdur:.2f}s).\n"
             f"Scene type: {audit.scene_type}, YAMNet music_prob_peak={transcript.music_prob_peak}.\n"
             f"Timed words (words marked NPC are game characters and will be hidden from subs):\n{word_lines}\n"
@@ -544,8 +554,20 @@ def curate_pass2_slice(
 def generate_clip_packaging(plan: EditPlan, transcript: AnnotatedTranscript, streamer_id: str) -> ClipPackaging:
     """Generate 5-network ClipPackaging (YT Shorts, TikTok, IG Reels, FB Reels, X) for an approved master clip."""
     clip_text = _slice_transcript_text(transcript, plan.start_trim, plan.end_trim)
+    rag_ctx = ""
+    try:
+        rag_ctx = build_curator_rag_context(
+            streamer_id=streamer_id,
+            topic_query=f"{plan.hook_headline} {plan.matched_lore_entity or ''} CTR curiosity gap cover",
+            stage="packaging",
+            max_tokens=550,
+        )
+    except Exception:
+        rag_ctx = ""
+    rag_block = f"RETRIEVED DESIGN/PACKAGING RAG CONTEXT (<=550 tokens):\n{rag_ctx}\n\n" if rag_ctx else ""
     prompt = (
         f"Generate algorithmic 5-network packaging for approved GTA VI clip_id='{plan.clip_id}' (streamer={streamer_id}).\n"
+        f"{rag_block}"
         f"Hook headline: {plan.hook_headline!r}\n"
         f"Matched lore entity: {plan.matched_lore_entity!r}\n"
         f"Duration: {plan.end_trim - plan.start_trim:.1f}s, voice_mode={plan.voice_mode}, dmca_clear={plan.dmca_clear}.\n"
@@ -553,11 +575,13 @@ def generate_clip_packaging(plan: EditPlan, transcript: AnnotatedTranscript, str
         "Constraints:\n"
         "- shorts_title: <= 60 characters, Tier-1 English, punchy, no AI-slop cliches.\n"
         "- shorts_hashtags: 3 to 5 clean hashtags (include #GTA6 #Shorts).\n"
-        "- suggested_on_screen_hook: <= 6 words.\n"
+        "- suggested_on_screen_hook: <= 6 words (ideally 2-4 words complementary to title for cover).\n"
         "- tiktok_caption: 1 conversational line prompting benign debate.\n"
-        "- reels_caption: short copy with save/DM share CTA.\n"
+        "- reels_caption: short copy with save/DM share CTA (Sends Per Reach).\n"
         "- facebook_reels_caption: nostalgic or community-debate 1-2 line caption inviting shares/comments.\n"
-        "- x_post_text: punchy native 1-liner <= 220 chars, zero external links, max 1-2 hashtags (#GTA6).\n"
+        "- x_post_text: punchy native 1-liner <= 220 chars, zero external links (link-in-reply only), max 1-2 hashtags (#GTA6).\n"
+        "- ab_hook_variants: 2 to 3 short alternative 0-3s visual hook texts (2-5 words each) for IG Trial Reels / TikTok A/B tests.\n"
+        "- author_reply_seed: 1 natural organic follow-up comment/question for the creator to reply manually on X (75x boost) or TikTok.\n"
         "- bounty_safe: true only if dmca_clear and voice_mode=='none'."
     )
     sys_inst = build_cached_system_instruction(
@@ -629,7 +653,16 @@ def curate_run(run_dir: Path, brief: str | None = None) -> RunState:
     for audit in approved_audits:
         cand = cand_map[audit.slice_id]
         tr = tr_map[audit.slice_id]
-        plan, critic = curate_pass2_slice(cand, tr, audit, run_dir, voice_mode=voice_mode, brief=brief, max_retries=1)
+        plan, critic = curate_pass2_slice(
+            cand,
+            tr,
+            audit,
+            run_dir,
+            voice_mode=voice_mode,
+            brief=brief,
+            max_retries=1,
+            streamer_id=state.streamer_id,
+        )
         critics.append(critic)
         print(
             f"[CURATOR_P2] {audit.slice_id}: overall={critic.overall:.2f} alone={critic.gate_alone} "
