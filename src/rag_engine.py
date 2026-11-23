@@ -403,6 +403,40 @@ def _collect_episodic_and_bounty_chunks(db_path: Path, project_root: Path) -> li
                     "content": body,
                 }
             )
+
+        # 3b. Real post-publish analytics metrics -> episodic_memory
+        pm_rows = conn.execute(
+            "SELECT id, ts, run_id, payload_json FROM telemetry WHERE event_type = 'publish_metrics' ORDER BY id DESC LIMIT 40"
+        ).fetchall()
+        for r in pm_rows:
+            try:
+                d = json.loads(str(r["payload_json"]))
+            except (ValueError, TypeError):
+                continue
+            cid_clip = str(d.get("clip_id") or "clip")
+            plat = str(d.get("platform") or "unknown")
+            views = int(d.get("views") or 0)
+            apv = float(d.get("avg_view_pct") or 0.0)
+            vvsa = float(d.get("vvsa_pct") or 0.0)
+            sends = float(d.get("sends_per_reach") or 0.0)
+            cpm = float(d.get("cpm_usd") or 0.0)
+            streamer = str(d.get("streamer_id") or "unknown")
+            hook_style = str(d.get("hook_style") or "")
+            verdict_tag = "WINNER" if (views >= 10_000 or vvsa >= 70.0 or apv >= 85.0) else "PUBLISHED_METRIC"
+            body = (
+                f"PublishMetrics [{verdict_tag}] run={r['run_id']} clip={cid_clip} platform={plat} "
+                f"streamer={streamer} views={views} VVSA={vvsa}% APV={apv}% Sends/Reach={sends} "
+                f"CPM=${cpm:.2f} hook_style={hook_style}"
+            )
+            chunks.append(
+                {
+                    "chunk_id": f"episodic_memory:publish_metrics:{r['id']}",
+                    "source_path": "runs/studio.db#telemetry",
+                    "domain": "episodic_memory",
+                    "heading": f"Publish Metrics {verdict_tag}: {streamer} {cid_clip} ({plat})",
+                    "content": body,
+                }
+            )
     finally:
         conn.close()
 
@@ -642,15 +676,160 @@ def _build_safe_fts_query(raw_query: str) -> str:
     return " OR ".join(dedup[:12])
 
 
+_WEBDEV_NOISE_PATTERNS = (
+    "react hook",
+    "react-hook-form",
+    "react native",
+    "reactjs",
+    "react:",
+    "react up",
+    "next.js",
+    "nextjs",
+    "tailwind",
+    "useeffect",
+    "usestate",
+    "usememo",
+    "usecallback",
+    "usecontext",
+    "typescript",
+    "javascript framework",
+    "cloudflare worker",
+    "wrangler",
+    "prisma",
+    "drizzle",
+    "supabase",
+    "express.js",
+    "webpack",
+    "vite.config",
+    "shadcn",
+    "graphql",
+    "rest api",
+    "sql injection",
+    "rls policy",
+    "eslint",
+    "biome.json",
+    "node_modules",
+    "css grid",
+    "flexbox",
+    "dom manipulation",
+    "frontend component",
+    "backend endpoint",
+    "astro.config",
+    "svelte",
+    "angular",
+    "vue.js",
+    "package.json",
+    "tsconfig",
+    "hook_method",
+    "hook-integration",
+    "pretooluse",
+    "posttooluse",
+    "session-stop",
+    "beautiful_code",
+    "source code",
+    "software engineering",
+    "kubernetes",
+    "docker",
+    "terraform",
+    "git hook",
+    "pre-commit",
+    "mern",
+    "full stack",
+    "full-stack",
+    "full_stack",
+    "mongodb",
+    "node.js",
+    "nodejs",
+    "web development",
+    "javascript",
+    "html/css",
+    "http server",
+    "microservices",
+    "kubernetes",
+)
+_WEBDEV_NOISE_CATEGORIES = frozenset(
+    {
+        "frontend",
+        "backend",
+        "web",
+        "webdev",
+        "css",
+        "react",
+        "nextjs",
+        "security_web",
+        "cloudflare",
+        "database",
+        "devops",
+        "api",
+        "agent-skill",
+        "tooling",
+        "infra",
+    }
+)
+
+
+def _is_webdev_noise_hit(rel_path: str, category: str, heading: str, text: str) -> bool:
+    """Return True if a federated Omni-RAG v6 hit is web-dev/software-engineering noise."""
+    cat_low = category.strip().lower()
+    if cat_low in _WEBDEV_NOISE_CATEGORIES:
+        return True
+    path_low = rel_path.replace("\\", "/").lower()
+    if any(
+        seg in path_low
+        for seg in (
+            "/react",
+            "/next",
+            "/css",
+            "/tailwind",
+            "/frontend",
+            "/backend",
+            "/cloudflare",
+            "/workers",
+            "/prisma",
+            "/drizzle",
+            "/supabase",
+            ".agents/skills/",
+            "react_hook",
+            "hook_form",
+            "hook-integration",
+            "beautiful_code",
+            "clean_code",
+            "pragmatic_programmer",
+            "designing_data_intensive",
+            "mern_stack",
+            "full_stack",
+            "node_js",
+            "web_dev",
+            "software_factory/",
+            "architecture_and_books/",
+            "cybersecurity/",
+            "bug_bounty",
+            "pro_git",
+            "_react_",
+            "react_",
+            ".tsx",
+            ".jsx",
+            ".css",
+            ".ts",
+            ".mjs",
+        )
+    ):
+        return True
+    hay = f"{rel_path} {heading} {text[:500]}".lower()
+    return any(pat in hay for pat in _WEBDEV_NOISE_PATTERNS)
+
+
 def query_omni_rag_federated(
     query: str,
     limit: int = 4,
     omni_dir: Path | None = None,
+    exclude_webdev_noise: bool = True,
 ) -> list[dict[str, Any]]:
     """Read-only FTS5 BM25 query against Omni-RAG v6 (`rag_hot.sqlite` + `rag_library.sqlite`).
 
     Strictly opens with `?mode=ro&immutable=1` so zero `-wal`/`-shm` files are created or locked
-    in `web-software-factory/.cache/`. Silently returns `[]` if files do not exist.
+    in `web-software-factory/.cache/`. Filters out React/CSS/backend web-dev noise by default
+    so audiovisual queries (e.g. "hook") only retrieve relevant psychology/editing/UX knowledge.
     """
     fts_q = _build_safe_fts_query(query)
     if not fts_q:
@@ -660,6 +839,7 @@ def query_omni_rag_federated(
     if not base_dir.is_dir():
         return []
 
+    raw_fetch = max(limit * 6, 24)
     hits: list[dict[str, Any]] = []
     for db_name, source_tag in (("rag_hot.sqlite", "omni_rag_hot"), ("rag_library.sqlite", "omni_rag_library")):
         db_file = base_dir / db_name
@@ -681,21 +861,31 @@ def query_omni_rag_federated(
                 ORDER BY bm25(chunks_fts)
                 LIMIT ?
                 """,
-                (fts_q, max(1, limit)),
+                (fts_q, raw_fetch),
             ).fetchall()
-            for rank, r in enumerate(rows, start=1):
+            kept_rank = 0
+            for r in rows:
+                rel_p = str(r["rel_path"] or r["title"] or "")
+                cat = str(r["category"] or "")
+                head = str(r["heading_path"] or r["title"] or "")
+                txt = str(r["text"] or "").strip()
+                if exclude_webdev_noise and _is_webdev_noise_hit(rel_p, cat, head, txt):
+                    continue
+                kept_rank += 1
                 hits.append(
                     {
                         "chunk_id": f"{source_tag}:{r['chunk_uid']}",
                         "source": source_tag,
-                        "source_path": str(r["rel_path"] or r["title"]),
-                        "domain": f"federated:{r['category'] or 'omni_rag'}",
-                        "heading": str(r["heading_path"] or r["title"]),
-                        "content": str(r["text"] or "").strip()[:900],
-                        "bm25_rank": rank,
-                        "rrf_score": round(1.9 / (RRF_K + rank), 6),
+                        "source_path": rel_p,
+                        "domain": f"federated:{cat or 'omni_rag'}",
+                        "heading": head,
+                        "content": txt[:900],
+                        "bm25_rank": kept_rank,
+                        "rrf_score": round(1.9 / (RRF_K + kept_rank), 6),
                     }
                 )
+                if kept_rank >= limit:
+                    break
         except Exception:
             continue
         finally:
@@ -865,7 +1055,7 @@ def build_curator_rag_context(
     stage: str = "pass2",
     max_tokens: int = 550,
     db_path: Path = DEFAULT_DB_PATH,
-    use_vectors: bool = False,
+    use_vectors: bool = True,
 ) -> str:
     """Retrieve bounded RAG context (streamer profile + episodic winners/errors + craft/CTR rules) for curator.py."""
     hits: list[dict[str, Any]] = []

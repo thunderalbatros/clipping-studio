@@ -44,6 +44,7 @@ def _log_telemetry(run_id: str, event_type: str, event: dict[str, object]) -> No
 
 
 def _render_and_verify(run_dir: Path, state: RunState, ab_variants: int = 1) -> RunState:
+    from src.analytics import emit_hitl_kit_5_networks
     from src.design_engine import render_editorial_cover_9_16
 
     compute_profile = os.getenv("COMPUTE_PROFILE", "local_hp").strip() or "local_hp"
@@ -57,7 +58,16 @@ def _render_and_verify(run_dir: Path, state: RunState, ab_variants: int = 1) -> 
         cand = cand_map[plan.slice_id]
         tr = tr_map[plan.slice_id]
         out_mp4 = run_dir / f"{plan.clip_id}_master_9_16.mp4"
-        render_master_clip(Path(cand.slice_video_path), plan, tr, out_mp4, compute_profile=compute_profile)
+        cover_clean_pre_ass = run_dir / f"{plan.clip_id}_cover_clean.jpg"
+        render_master_clip(
+            Path(cand.slice_video_path),
+            plan,
+            tr,
+            out_mp4,
+            compute_profile=compute_profile,
+            clean_cover_out=cover_clean_pre_ass,
+            enforce_speaker_guard=True,
+        )
 
         qa_dir = run_dir / f"{plan.clip_id}_qa_frames"
         verdict = evaluate_video(out_mp4, qa_dir=qa_dir)
@@ -79,15 +89,22 @@ def _render_and_verify(run_dir: Path, state: RunState, ab_variants: int = 1) -> 
         if verdict["passed"]:
             pkg = generate_clip_packaging(plan, tr, state.streamer_id)
             try:
-                cover_clean = run_dir / f"{plan.clip_id}_cover_clean.jpg"
                 cover_9_16 = run_dir / f"{plan.clip_id}_cover_9_16.jpg"
                 cover_headline = pkg.suggested_on_screen_hook or plan.hook_headline
+                fallbacks = list(pkg.ab_hook_variants)
+                if plan.freeze_frame is not None:
+                    fallbacks.append(plan.freeze_frame.callout_text)
+                # ALWAYS pass pre-libass clean 9:16 frame so ZERO burned captions leak into cover_9_16.jpg
+                cover_source = cover_clean_pre_ass if cover_clean_pre_ass.is_file() else Path(cand.slice_video_path)
                 cov_meta = render_editorial_cover_9_16(
-                    video_or_img=out_mp4,
+                    video_or_img=cover_source,
                     headline=cover_headline,
                     out_jpg=cover_9_16,
-                    clean_cover_jpg=cover_clean,
+                    clean_cover_jpg=cover_clean_pre_ass,
+                    title=pkg.shorts_title,
+                    fallback_headlines=fallbacks,
                 )
+                pkg.suggested_on_screen_hook = str(cov_meta.get("cover_headline_used") or pkg.suggested_on_screen_hook)
                 pkg.cover_timestamp_ms = int(cov_meta.get("cover_timestamp_ms") or 0)
                 pkg.cover_clean_path = str(cov_meta.get("cover_clean_path") or "")
                 pkg.cover_9_16_path = str(cov_meta.get("cover_path") or "")
@@ -106,9 +123,10 @@ def _render_and_verify(run_dir: Path, state: RunState, ab_variants: int = 1) -> 
             packages.append(pkg)
             pkg_json_str = pkg.model_dump_json(indent=2)
             (run_dir / f"{plan.clip_id}_packaging.json").write_text(pkg_json_str, encoding="utf-8")
+            hitl_kit = emit_hitl_kit_5_networks(pkg, out_mp4, run_dir)
             print(
-                f"[PACKAGING] {plan.clip_id}: title={pkg.shorts_title!r} tags={pkg.shorts_hashtags} "
-                f"cover_ts_ms={pkg.cover_timestamp_ms}"
+                f"[PACKAGING] {plan.clip_id}: title={pkg.shorts_title!r} cover_hook={pkg.suggested_on_screen_hook!r} "
+                f"tags={pkg.shorts_hashtags} cover_ts_ms={pkg.cover_timestamp_ms} kit={hitl_kit['kit_md_path']}"
             )
 
         cr = critic_map.get(plan.clip_id)
@@ -178,10 +196,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         state = RunState.model_validate_json(state_path.read_text(encoding="utf-8"))
 
     if cur_stage < 2:
-        state = transcribe_run(run_dir)
+        state = transcribe_run(run_dir, audio_policy=args.audio_policy)
 
     if cur_stage < 3:
-        state = curate_run(run_dir, brief=args.brief)
+        state = curate_run(run_dir, brief=args.brief, audio_policy=args.audio_policy)
 
     if state.edit_plans:
         state = _render_and_verify(run_dir, state, ab_variants=args.ab_variants)
@@ -212,11 +230,11 @@ def cmd_curate(args: argparse.Namespace) -> int:
     init_db()
     run_dir = RUNS_DIR / args.run_id
     if args.retranscribe:
-        transcribe_run(run_dir)
-    state = curate_run(run_dir, brief=args.brief)
+        transcribe_run(run_dir, audio_policy=args.audio_policy)
+    state = curate_run(run_dir, brief=args.brief, audio_policy=args.audio_policy)
     if args.render and state.edit_plans:
         state = _render_and_verify(run_dir, state, ab_variants=args.ab_variants)
-    print(f"[CLI_CURATE] run_id={args.run_id} audits={len(state.slice_audits)} plans={len(state.edit_plans)}")
+    print(f"[CLI_CURATE] run_id={args.run_id} audits={len(state.slice_audits)} plans={len(state.edit_plans)} audio_policy={state.audio_policy}")
     return 0
 
 
@@ -259,13 +277,33 @@ def cmd_steal(args: argparse.Namespace) -> int:
 
 
 def cmd_bounties(args: argparse.Namespace) -> int:
-    """Scan, list, or apply HITL approval verdict to CPM bounty campaigns."""
-    from src.bounties import approve_bounty, get_bounties, scan_bounties
+    """Scan, import (HITL), purge junk, list, or approve CPM bounty campaigns."""
+    from src.bounties import approve_bounty, get_bounties, import_bounty_hitl, purge_junk_campaigns, scan_bounties
 
     init_db()
     if args.bounty_cmd == "scan":
         found = scan_bounties(max_per_platform=args.limit, enrich_firecrawl=bool(args.firecrawl))
         print(json.dumps({"discovered": len(found), "campaigns": found}, indent=2, ensure_ascii=False))
+        return 0
+    if args.bounty_cmd == "import":
+        rec = import_bounty_hitl(
+            platform=args.platform,
+            title=args.title,
+            url=args.url,
+            cpm_usd=args.cpm,
+            burn_rate_pct=args.burn_rate,
+            geo_requirement=args.geo,
+            platforms=args.platforms,
+            audio_policy=args.audio_policy,
+            brief_text=args.brief,
+            voice_policy=args.voice_policy,
+            verdict=args.verdict,
+        )
+        print(json.dumps(rec, indent=2, ensure_ascii=False))
+        return 0
+    if args.bounty_cmd == "purge-junk":
+        res = purge_junk_campaigns()
+        print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0
     if args.bounty_cmd == "list":
         rows = get_bounties(verdict=args.verdict)
@@ -276,6 +314,16 @@ def cmd_bounties(args: argparse.Namespace) -> int:
         print(json.dumps({"campaign_id": args.id, "verdict": args.verdict, "updated": ok}))
         return 0 if ok else 1
     return 1
+
+
+def cmd_gc(args: argparse.Namespace) -> int:
+    """Purge temporary/intermediate files inside `runs/` while preserving studio.db, models/, and READY_HITL clips."""
+    from src.gc import run_storage_gc
+
+    init_db()
+    report = run_storage_gc(ttl_hours=args.ttl_hours, dry_run=bool(args.dry_run))
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
 
 
 def cmd_snipe(args: argparse.Namespace) -> int:
@@ -382,6 +430,9 @@ def cmd_analytics(args: argparse.Namespace) -> int:
             comments=args.comments,
             avg_view_pct=args.avg_view_pct,
             swiped_away_pct=args.swiped_away_pct,
+            vvsa_pct=args.vvsa_pct,
+            sends_per_reach=args.sends_per_reach,
+            cpm_usd=args.cpm_usd,
             published_url=args.url,
             streamer_id=args.streamer,
             hook_style=args.hook_style,
@@ -431,7 +482,7 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     from dotenv import load_dotenv
 
     from src.design_engine import REMBG_HOME, find_headless_browser
-    from src.miner import _ensure_media_path
+    from src.miner import _ensure_media_path, find_deno_executable
     from src.rag_engine import inspect_rag_status
     from src.renderer import find_auto_editor_executable
 
@@ -455,16 +506,14 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     )
     env_status = {k: ("PRESENTE" if os.getenv(k, "").strip() else "FALTANTE") for k in env_keys}
 
-    deno_found = (
-        bool(shutil.which("deno"))
-        or (Path.home() / ".deno" / "bin" / "deno.exe").exists()
-        or (Path(os.getenv("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links" / "deno.exe").exists()
-    )
+    deno_exe = find_deno_executable()
+    deno_found = deno_exe is not None
     browser_bin = find_headless_browser()
     bins = {
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "ffprobe": bool(shutil.which("ffprobe")),
         "deno": deno_found,
+        "deno_path": str(deno_exe) if deno_exe is not None else None,
         "yt-dlp": (PROJECT_ROOT / ".venv" / "Scripts" / "yt-dlp.exe").exists() or bool(shutil.which("yt-dlp")),
         "TwitchDownloaderCLI": (PROJECT_ROOT / ".venv" / "Scripts" / "TwitchDownloaderCLI.exe").exists()
         or bool(shutil.which("TwitchDownloaderCLI")),
@@ -510,6 +559,12 @@ def main() -> int:
     p_run.add_argument("--run-id", default=None)
     p_run.add_argument("--top-k", type=int, default=2)
     p_run.add_argument("--brief", default=None, help="Optional campaign brief matched against gta6_lore_index.json")
+    p_run.add_argument(
+        "--audio-policy",
+        choices=["strict_clean", "sound_campaign", "keep_original"],
+        default="strict_clean",
+        help="3-mode YAMNet audio policy (strict_clean | sound_campaign | keep_original)",
+    )
     p_run.add_argument("--ab-variants", type=int, default=1, help="Set to 2 to also render Variant B (IG Trial Reels)")
     p_run.add_argument("--allow-short", action="store_true")
     p_run.add_argument("--allow-trailer", action="store_true")
@@ -522,6 +577,11 @@ def main() -> int:
     p_cur = sub.add_parser("curate", help="Re-run transcriber/curator/render on an existing run")
     p_cur.add_argument("--run-id", required=True)
     p_cur.add_argument("--brief", default=None)
+    p_cur.add_argument(
+        "--audio-policy",
+        choices=["strict_clean", "sound_campaign", "keep_original"],
+        default="strict_clean",
+    )
     p_cur.add_argument("--ab-variants", type=int, default=1)
     p_cur.add_argument("--retranscribe", action="store_true")
     p_cur.add_argument("--render", action="store_true")
@@ -538,17 +598,43 @@ def main() -> int:
     p_st.add_argument("--max-sec", type=int, default=45)
     p_st.set_defaults(func=cmd_steal)
 
-    p_bn = sub.add_parser("bounties", help="Bounty Radar & HITL CPM campaign auditor (Whop/Clipping.net/Vyro/ClipBoom)")
+    p_bn = sub.add_parser(
+        "bounties",
+        aliases=["bounty"],
+        help="Bounty Radar & HITL CPM campaign auditor (Whop/Clipping.net/Vyro/ClipBoom)",
+    )
     bn_sub = p_bn.add_subparsers(dest="bounty_cmd", required=True)
     bn_scan = bn_sub.add_parser("scan", help="Scan public bounty directories -> SQLite (PENDING_HITL)")
     bn_scan.add_argument("--limit", type=int, default=3)
     bn_scan.add_argument("--firecrawl", action="store_true", help="Enrich URLs with Firecrawl markdown")
-    bn_list = bn_sub.add_parser("list", help="List persisted campaigns in runs/studio.db")
+    bn_imp = bn_sub.add_parser("import", help="Import a verified HITL campaign brief/URL into runs/studio.db")
+    bn_imp.add_argument("--platform", required=True, help="whop | clipping_net | vyro | clipboom | direct")
+    bn_imp.add_argument("--title", required=True)
+    bn_imp.add_argument("--url", required=True)
+    bn_imp.add_argument("--cpm", type=float, required=True, help="CPM USD per 1k views (must be > 0)")
+    bn_imp.add_argument("--burn-rate", type=float, default=35.0)
+    bn_imp.add_argument("--geo", choices=["global", "tier1_60pct", "latam"], default="global")
+    bn_imp.add_argument("--platforms", default="youtube_shorts,x")
+    bn_imp.add_argument(
+        "--audio-policy",
+        choices=["strict_clean", "sound_campaign", "keep_original"],
+        default="strict_clean",
+    )
+    bn_imp.add_argument("--voice-policy", default="none")
+    bn_imp.add_argument("--brief", default="")
+    bn_imp.add_argument("--verdict", choices=["PENDING_HITL", "APPROVED", "REJECTED"], default="PENDING_HITL")
+    bn_sub.add_parser("purge-junk", help="Remove invalid non-campaign rows (cpm<=0, blogs, stores) from studio.db")
+    bn_list = bn_sub.add_parser("list", help="List persisted campaigns in runs/studio.db (Argentina geo-prioritized)")
     bn_list.add_argument("--verdict", default=None, choices=["PENDING_HITL", "APPROVED", "REJECTED"])
     bn_app = bn_sub.add_parser("approve", help="Apply human-in-the-loop verdict to a campaign")
     bn_app.add_argument("--id", required=True)
     bn_app.add_argument("--verdict", default="APPROVED", choices=["APPROVED", "REJECTED", "PENDING_HITL"])
     p_bn.set_defaults(func=cmd_bounties)
+
+    p_gc = sub.add_parser("gc", help="Purge disposable intermediate files in runs/ preserving studio.db, models/ and READY_HITL")
+    p_gc.add_argument("--dry-run", action="store_true", help="Report reclaimable files without deleting")
+    p_gc.add_argument("--ttl-hours", type=float, default=72.0, help="Age threshold in hours for intermediate files")
+    p_gc.set_defaults(func=cmd_gc)
 
     p_sn = sub.add_parser("snipe", help="Monitor 1-2 live Twitch/Kick streams for chat spikes -> JIT 90s clip")
     p_sn.add_argument("--channels", required=True, help="Comma-separated channels, e.g. twitch:caseoh_,kick:xqc")
@@ -590,6 +676,9 @@ def main() -> int:
     an_log.add_argument("--comments", type=int, default=0)
     an_log.add_argument("--avg-view-pct", type=float, default=0.0)
     an_log.add_argument("--swiped-away-pct", type=float, default=0.0)
+    an_log.add_argument("--vvsa-pct", type=float, default=None)
+    an_log.add_argument("--sends-per-reach", type=float, default=0.0)
+    an_log.add_argument("--cpm-usd", type=float, default=0.0)
     an_log.add_argument("--url", default="")
     an_log.add_argument("--streamer", default="")
     an_log.add_argument("--hook-style", default="")

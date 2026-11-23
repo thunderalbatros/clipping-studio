@@ -45,6 +45,7 @@ def _infer_hook_style(title: str) -> tuple[str, str]:
 
 def fetch_youtube_gta6_shorts_trends(hours_back: int = 48, max_results: int = 12) -> list[dict[str, Any]]:
     """Query YouTube Data API v3 for #GTA6 #Shorts in the last 24-48h with views_per_hour & like_ratio."""
+    load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=True)
     api_key = (os.getenv("YOUTUBE_API_KEY") or "").strip()
     if not api_key:
         print("[TRENDS] YOUTUBE_API_KEY missing; skipping YouTube Data API v3.")

@@ -36,19 +36,44 @@ _RES_RE = re.compile(r"RESOLUTION=(\d+)x(\d+)")
 _BW_RE = re.compile(r"BANDWIDTH=(\d+)")
 
 
-def _ensure_media_path() -> None:
-    """Ensure .venv\\Scripts and winget Deno are on PATH for yt-dlp / TwitchDownloaderCLI."""
-    extra_dirs: list[Path] = [PROJECT_ROOT / ".venv" / "Scripts"]
+def find_deno_executable() -> Path | None:
+    """Auto-detect `deno.exe` across PATH, user `~/.deno/bin`, and WinGet Packages (handles nested dirs)."""
+    found = shutil.which("deno")
+    if found:
+        return Path(found)
+
+    candidates: list[Path] = [Path.home() / ".deno" / "bin" / "deno.exe"]
     local_app = os.environ.get("LOCALAPPDATA", "")
     if local_app:
+        candidates.append(Path(local_app) / "Microsoft" / "WinGet" / "Links" / "deno.exe")
         pkg_root = Path(local_app) / "Microsoft" / "WinGet" / "Packages"
-        if pkg_root.exists():
-            extra_dirs.extend(pkg_root.glob("DenoLand.Deno*"))
+        if pkg_root.is_dir():
+            for pkg_dir in pkg_root.glob("DenoLand.Deno*"):
+                direct = pkg_dir / "deno.exe"
+                if direct.is_file():
+                    return direct
+                for nested in pkg_dir.rglob("deno.exe"):
+                    if nested.is_file():
+                        return nested
+    for cand in candidates:
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _ensure_media_path() -> None:
+    """Ensure .venv\\Scripts and auto-detected Deno directory are on PATH for yt-dlp / TwitchDownloaderCLI."""
+    extra_dirs: list[Path] = [PROJECT_ROOT / ".venv" / "Scripts"]
+    deno_exe = find_deno_executable()
+    if deno_exe is not None:
+        extra_dirs.append(deno_exe.parent)
+    local_app = os.environ.get("LOCALAPPDATA", "")
+    if local_app:
         links = Path(local_app) / "Microsoft" / "WinGet" / "Links"
-        if links.exists():
+        if links.is_dir():
             extra_dirs.append(links)
     user_deno = Path.home() / ".deno" / "bin"
-    if user_deno.exists():
+    if user_deno.is_dir():
         extra_dirs.append(user_deno)
 
     current = os.environ.get("PATH", "")
@@ -101,17 +126,30 @@ def load_whitelist() -> dict[str, dict[str, Any]]:
     return dict(data.get("streamers") or {})
 
 
-def validate_streamer_whitelist(streamer_id: str, allow_unlisted: bool = False) -> dict[str, Any]:
+def validate_streamer_whitelist(
+    streamer_id: str,
+    allow_unlisted: bool = True,
+    strict: bool = False,
+) -> dict[str, Any]:
+    """Return configured streamer profile or a clean dynamic base profile for arbitrary bounty creators."""
     wl = load_whitelist()
     key = streamer_id.strip().lower()
     if key in wl:
         return wl[key]
-    if allow_unlisted:
-        return {"display_name": streamer_id, "platforms": ["twitch", "kick", "youtube"]}
-    raise ValueError(
-        f"Streamer '{streamer_id}' is not in config/streamers.yaml whitelist "
-        f"(allowed: {sorted(wl.keys())}; pass --allow-unlisted to override)."
-    )
+    if strict and not allow_unlisted:
+        raise ValueError(
+            f"Streamer '{streamer_id}' is not in config/streamers.yaml whitelist "
+            f"(allowed: {sorted(wl.keys())}; pass --allow-unlisted to override)."
+        )
+    print(f"[MINER] dynamic base profile activated for unlisted creator '{streamer_id}'")
+    return {
+        "display_name": streamer_id.strip() or "creator",
+        "platforms": ["twitch", "kick", "youtube"],
+        "language": "en",
+        "dynamic_profile": True,
+        "webcam_box": None,
+        "hook_style": "high-energy reaction",
+    }
 
 
 def detect_platform(url: str) -> Literal["youtube", "twitch", "kick", "local"]:
@@ -128,9 +166,12 @@ def detect_platform(url: str) -> Literal["youtube", "twitch", "kick", "local"]:
 
 
 def _yt_dlp_base_cmd() -> list[str]:
+    _ensure_media_path()
     yt_exe = PROJECT_ROOT / ".venv" / "Scripts" / "yt-dlp.exe"
     exe = str(yt_exe) if yt_exe.exists() else "yt-dlp"
-    cmd = [exe, "--js-runtimes", "deno", "--remote-components", "ejs:github"]
+    deno_exe = find_deno_executable()
+    deno_spec = f"deno:{deno_exe}" if deno_exe is not None else "deno"
+    cmd = [exe, "--js-runtimes", deno_spec, "--remote-components", "ejs:github"]
     cookies_env = (os.getenv("YT_COOKIES_PATH") or "").strip()
     if cookies_env:
         cp = Path(cookies_env)
@@ -785,9 +826,9 @@ def mine_vod_slices(
 
         if platform == "youtube" and isinstance(heatmap, list) and len(heatmap) > 0:
             scored = [
-                ((float(h["start_time"]) + float(h["end_time"])) / 2.0, float(h.get("value", 0.0)))
+                ((float(str(h["start_time"])) + float(str(h["end_time"]))) / 2.0, float(str(h.get("value", 0.0))))
                 for h in heatmap
-                if "start_time" in h and "end_time" in h
+                if isinstance(h, dict) and "start_time" in h and "end_time" in h
             ]
             windows = _select_non_overlapping_peaks(scored, total_dur, top_k=top_k)
             signal_source = "youtube_heatmap"

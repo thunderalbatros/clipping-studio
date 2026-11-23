@@ -1,9 +1,10 @@
 """Bounty Radar & CPM Campaign Auditor (Whop Content Rewards, Clipping.net, Vyro, ClipBoom).
 
-Read-only discovery via Serper.dev + optional Firecrawl (zero login scraping, zero auto-apply).
-Every discovered campaign is audited deterministically against Argentina eligibility, burn-rate
-window (20%..80%), trap clauses, and voice policy, then persisted to SQLite (`campaigns` table)
-with `verdict='PENDING_HITL'` until explicitly approved by the human operator.
+Read-only discovery via Serper.dev + optional Firecrawl (zero login scraping, zero auto-apply)
+PLUS deterministic HITL `bounty import` for verified campaign briefs.
+Hard validation rejects non-campaign noise URLs (blogs, YouTube videos, App/Play Stores, bare homepages)
+and any record with `cpm_usd <= 0`. Prioritizes `global` / `latam` (YT Shorts/X) over `tier1_60pct`
+geo-locked TikTok/IG campaigns for Argentina-based production.
 """
 
 from __future__ import annotations
@@ -12,17 +13,84 @@ import hashlib
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlparse
 
 from curl_cffi import requests as curl_requests
 from dotenv import load_dotenv
 
-from src.db import DEFAULT_DB_PATH, insert_telemetry, list_campaigns, set_campaign_verdict, upsert_campaign
+from src.db import (
+    DEFAULT_DB_PATH,
+    delete_campaign,
+    insert_telemetry,
+    list_campaigns,
+    set_campaign_verdict,
+    upsert_campaign,
+)
 from src.miner import PROJECT_ROOT
+from src.schemas import AudioPolicy
+
+GeoRequirement = Literal["global", "tier1_60pct", "latam"]
+VALID_GEO_REQUIREMENTS = frozenset({"global", "tier1_60pct", "latam"})
+VALID_AUDIO_POLICIES = frozenset({"strict_clean", "sound_campaign", "keep_original"})
 
 _CPM_RE = re.compile(r"\$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/|per)\s*(?:1k|1,000|k\b|1000\s*views)", re.IGNORECASE)
 _BURN_RE = re.compile(r"([0-9]{1,3}(?:\.[0-9]+)?)\s*%\s*(?:paid|claimed|used|spent|funded|burned)", re.IGNORECASE)
 _MIN_VIEWS_RE = re.compile(r"(?:min(?:imum)?\s*views?[:\s]*)([0-9][0-9,\.]*\s*[km]?)", re.IGNORECASE)
+_URL_IN_TEXT_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+
+_NOISE_DOMAINS = (
+    "youtube.com",
+    "youtu.be",
+    "play.google.com",
+    "apps.apple.com",
+    "ssemble.com",
+    "medium.com",
+    "reddit.com",
+    "quora.com",
+    "wikipedia.org",
+    "trustpilot.com",
+    "g2.com",
+    "capterra.com",
+    "forbes.com",
+    "techcrunch.com",
+    "linkedin.com",
+)
+_NOISE_PATH_MARKERS = (
+    "/blog",
+    "/articles",
+    "/article",
+    "/news",
+    "/brands",
+    "/pricing",
+    "/about",
+    "/faq",
+    "/privacy",
+    "/terms",
+    "/careers",
+    "/how-to",
+    "/best-clipping",
+    "/guide",
+)
+_NOISE_TITLE_MARKERS = (
+    "apps on google play",
+    "app store - apple",
+    "i tried every clipping platform",
+    "best clipping platforms",
+    "how to run a",
+    "clipping campaigns for brands",
+    "the original & largest clipping network",
+)
+_KNOWN_BOUNTY_DOMAINS = (
+    "whop.com",
+    "clipping.net",
+    "vyro.com",
+    "vyro.gg",
+    "clipboom.com",
+    "clipboom.app",
+    "clipster.gg",
+    "bounty.gg",
+)
 
 _GEO_BLOCK_MARKERS = (
     "us residents only",
@@ -33,6 +101,23 @@ _GEO_BLOCK_MARKERS = (
     "w-9 required",
     "us bank account only",
     "tier-1 creators only",
+)
+_TIER1_AUDIENCE_MARKERS = (
+    "60% us",
+    "50% us",
+    "tier-1 audience",
+    "tier 1 audience",
+    "us viewers only",
+    "us/uk/ca audience",
+    "geo-lock",
+    "us audience required",
+)
+_LATAM_MARKERS = (
+    "latam",
+    "argentina",
+    "spanish",
+    "español",
+    "hispano",
 )
 _TRAP_CLAUSE_MARKERS = (
     "exclusive rights",
@@ -51,10 +136,10 @@ _ANTI_AI_VOICE_MARKERS = (
 )
 
 BOUNTY_SEARCH_QUERIES: list[tuple[str, str]] = [
-    ("whop", 'site:whop.com "content rewards" ("GTA 6" OR "GTA VI" OR "gaming" OR "clipping") CPM'),
-    ("clipping_net", 'site:clipping.net ("GTA" OR "gaming" OR "streamer") campaign CPM'),
-    ("vyro", 'site:vyro.com OR "vyro" ("content rewards" OR "clipping") gaming CPM'),
-    ("clipboom", 'site:clipboom.com OR "clipboom" ("clipping" OR "bounty") gaming CPM'),
+    ("whop", 'site:whop.com/ "content rewards" ("$/1k" OR "per 1,000" OR "per 1k") ("gaming" OR "GTA" OR "clipping")'),
+    ("clipping_net", 'site:clipping.net ("$/1k" OR "per 1k" OR "CPM") ("gaming" OR "GTA" OR "campaign")'),
+    ("vyro", 'site:vyro.com ("$/1k" OR "per 1k" OR "CPM") ("gaming" OR "clipping")'),
+    ("clipboom", 'site:clipboom.com ("$/1k" OR "per 1k" OR "CPM") ("gaming" OR "clipping")'),
 ]
 
 
@@ -73,6 +158,68 @@ def _parse_compact_int(raw: str) -> int:
         return 0
 
 
+def classify_geo_requirement(
+    title: str,
+    brief_text: str,
+    geo_lock: str = "",
+    explicit_geo: str | None = None,
+) -> GeoRequirement:
+    """Classify campaign into `global` | `tier1_60pct` | `latam` for Argentina operator prioritization."""
+    if explicit_geo:
+        g = explicit_geo.strip().lower()
+        if g == "global":
+            return "global"
+        if g == "tier1_60pct":
+            return "tier1_60pct"
+        if g == "latam":
+            return "latam"
+    hay = f"{title}\n{brief_text}\n{geo_lock}".lower()
+    if any(m in hay for m in _GEO_BLOCK_MARKERS) or any(m in hay for m in _TIER1_AUDIENCE_MARKERS):
+        return "tier1_60pct"
+    if any(m in hay for m in _LATAM_MARKERS):
+        return "latam"
+    return "global"
+
+
+def is_valid_campaign_record(
+    url: str,
+    title: str,
+    cpm_usd: float,
+    *,
+    require_known_domain: bool = False,
+) -> tuple[bool, str]:
+    """Strict deterministic filter rejecting non-campaign noise URLs and `cpm_usd <= 0`."""
+    if float(cpm_usd) <= 0.0:
+        return False, f"invalid_cpm:{cpm_usd}"
+
+    raw_url = url.strip()
+    if not raw_url:
+        return False, "missing_campaign_url"
+    parsed = urlparse(raw_url)
+    host = parsed.netloc.lower().removeprefix("www.")
+    path = (parsed.path or "").strip().lower()
+
+    if not host or parsed.scheme not in {"http", "https"}:
+        return False, f"invalid_url_scheme:{raw_url}"
+    if any(host == d or host.endswith("." + d) for d in _NOISE_DOMAINS):
+        return False, f"noise_domain:{host}"
+    if path in {"", "/"}:
+        return False, f"bare_homepage_not_campaign:{raw_url}"
+    if any(marker in path for marker in _NOISE_PATH_MARKERS):
+        return False, f"noise_path:{path}"
+
+    title_low = title.strip().lower()
+    if not title_low or title_low in {"articles", "blog", "home", "clipping"}:
+        return False, f"generic_non_campaign_title:{title}"
+    if any(m in title_low for m in _NOISE_TITLE_MARKERS):
+        return False, f"noise_title:{title}"
+
+    if require_known_domain and not any(host == d or host.endswith("." + d) for d in _KNOWN_BOUNTY_DOMAINS):
+        return False, f"unrecognized_bounty_host:{host}"
+
+    return True, "valid_campaign"
+
+
 def audit_campaign_rules(
     title: str,
     brief_text: str,
@@ -81,8 +228,10 @@ def audit_campaign_rules(
     geo_lock: str = "",
     min_views: int = 0,
     voice_policy: str = "none",
+    geo_requirement: str | None = None,
+    platforms: str = "",
 ) -> dict[str, Any]:
-    """Deterministic bounty risk & eligibility audit for an Argentina-based Clipping Studio operator."""
+    """Deterministic bounty risk, Argentina geo-priority & eligibility audit."""
     haystack = f"{title}\n{brief_text}\n{geo_lock}".lower()
     risk_flags: list[str] = []
     eligible_from_ar = True
@@ -95,6 +244,11 @@ def audit_campaign_rules(
     for marker in _TRAP_CLAUSE_MARKERS:
         if marker in haystack:
             risk_flags.append(f"TRAP_CLAUSE:{marker}")
+
+    detected_geo = classify_geo_requirement(title, brief_text, geo_lock=geo_lock, explicit_geo=geo_requirement)
+    plat_low = platforms.lower()
+    if detected_geo == "tier1_60pct" and any(p in plat_low for p in ("tiktok", "instagram")):
+        risk_flags.append("GEO_LOCK_RISK:tiktok_ig_tier1_from_ar")
 
     detected_voice = voice_policy
     if any(m in haystack for m in _ANTI_AI_VOICE_MARKERS):
@@ -121,8 +275,14 @@ def audit_campaign_rules(
     else:
         rec = "APPROVE_CANDIDATE"
 
+    ar_priority = 100 if detected_geo == "global" else (85 if detected_geo == "latam" else 35)
+    if any(p in plat_low for p in ("youtube_shorts", "youtube", "x")):
+        ar_priority += 10
+
     return {
         "eligible_from_ar": eligible_from_ar,
+        "geo_requirement": detected_geo,
+        "ar_priority_score": ar_priority,
         "voice_policy": detected_voice,
         "risk_flags": risk_flags,
         "verdict_recommendation": rec,
@@ -182,14 +342,124 @@ def _firecrawl_scrape_markdown(url: str) -> str:
         return ""
 
 
+def purge_junk_campaigns(db_path: Path = DEFAULT_DB_PATH) -> dict[str, Any]:
+    """Remove non-campaign junk rows (blogs, YouTube videos, App Stores, homepages, cpm_usd<=0) from studio.db."""
+    rows = list_campaigns(verdict=None, geo_priority=False, db_path=db_path)
+    removed: list[dict[str, Any]] = []
+    kept: list[str] = []
+    for row in rows:
+        cid = str(row["campaign_id"])
+        title = str(row.get("title") or "")
+        cpm = float(row.get("cpm_usd") or 0.0)
+        url = str(row.get("url") or "").strip()
+        if not url:
+            m_url = _URL_IN_TEXT_RE.search(str(row.get("brief_text") or ""))
+            url = m_url.group(0) if m_url else ""
+        ok, reason = is_valid_campaign_record(url, title, cpm)
+        if not ok:
+            delete_campaign(cid, db_path=db_path)
+            removed.append({"campaign_id": cid, "title": title, "cpm_usd": cpm, "reason": reason})
+        else:
+            kept.append(cid)
+    return {"removed_count": len(removed), "kept_count": len(kept), "removed": removed, "kept": kept}
+
+
+def import_bounty_hitl(
+    *,
+    platform: str,
+    title: str,
+    url: str,
+    cpm_usd: float,
+    burn_rate_pct: float = 0.0,
+    geo_requirement: str = "global",
+    platforms: str = "youtube_shorts,x",
+    audio_policy: AudioPolicy = "strict_clean",
+    brief_text: str = "",
+    voice_policy: str = "none",
+    verdict: str = "PENDING_HITL",
+    campaign_id: str | None = None,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> dict[str, Any]:
+    """Deterministically validate and persist a real HITL bounty campaign into `runs/studio.db`."""
+    ok, reason = is_valid_campaign_record(url, title, cpm_usd, require_known_domain=False)
+    if not ok:
+        raise ValueError(f"Rejected invalid bounty campaign: {reason}")
+    geo_clean = geo_requirement.strip().lower()
+    if geo_clean not in VALID_GEO_REQUIREMENTS:
+        raise ValueError(f"Invalid geo_requirement {geo_requirement!r}; expected one of {sorted(VALID_GEO_REQUIREMENTS)}")
+    if audio_policy not in VALID_AUDIO_POLICIES:
+        raise ValueError(f"Invalid audio_policy {audio_policy!r}; expected one of {sorted(VALID_AUDIO_POLICIES)}")
+
+    full_brief = f"{brief_text.strip()}\nURL: {url.strip()}".strip()
+    audit = audit_campaign_rules(
+        title=title,
+        brief_text=full_brief,
+        cpm_usd=cpm_usd,
+        burn_rate_pct=burn_rate_pct,
+        voice_policy=voice_policy,
+        geo_requirement=geo_clean,
+        platforms=platforms,
+    )
+    cid = campaign_id or f"{platform.strip().lower()}_{hashlib.sha1(url.strip().encode('utf-8')).hexdigest()[:10]}"
+    upsert_res = upsert_campaign(
+        campaign_id=cid,
+        platform=platform.strip().lower(),
+        title=title.strip(),
+        cpm_usd=round(float(cpm_usd), 2),
+        burn_rate_pct=round(max(0.0, min(100.0, float(burn_rate_pct))), 2),
+        geo_lock="AR_ELIGIBLE" if audit["eligible_from_ar"] else "GEO_BLOCKED",
+        voice_policy=audit["voice_policy"],
+        brief_text=full_brief[:2400],
+        verdict=verdict,
+        db_path=db_path,
+        geo_requirement=audit["geo_requirement"],
+        platforms=platforms.strip(),
+        audio_policy=audio_policy,
+        url=url.strip(),
+    )
+    insert_telemetry(
+        "bounty_radar",
+        "bounty_imported_hitl",
+        {
+            "campaign_id": cid,
+            "platform": platform.strip().lower(),
+            "cpm_usd": cpm_usd,
+            "geo_requirement": audit["geo_requirement"],
+            "audio_policy": audio_policy,
+        },
+        db_path=db_path,
+    )
+    return {
+        "campaign_id": cid,
+        "platform": platform.strip().lower(),
+        "title": title.strip(),
+        "url": url.strip(),
+        "cpm_usd": round(float(cpm_usd), 2),
+        "burn_rate_pct": round(float(burn_rate_pct), 2),
+        "geo_requirement": audit["geo_requirement"],
+        "ar_priority_score": audit["ar_priority_score"],
+        "platforms": platforms.strip(),
+        "audio_policy": audio_policy,
+        "voice_policy": audit["voice_policy"],
+        "verdict": upsert_res["verdict"],
+        "recommendation": audit["verdict_recommendation"],
+        "eligible_from_ar": audit["eligible_from_ar"],
+        "risk_flags": audit["risk_flags"],
+    }
+
+
 def scan_bounties(
     max_per_platform: int = 4,
     enrich_firecrawl: bool = False,
     db_path: Path = DEFAULT_DB_PATH,
 ) -> list[dict[str, Any]]:
-    """Discover public CPM clipping campaigns across Whop, Clipping.net, Vyro & ClipBoom -> SQLite."""
+    """Discover real public CPM clipping campaigns across Whop, Clipping.net, Vyro & ClipBoom -> SQLite.
+
+    Strictly rejects blogs, YouTube videos, App Stores, bare homepages, and any result with `cpm_usd <= 0`.
+    """
     load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=True)
     results: list[dict[str, Any]] = []
+    rejected_noise = 0
 
     for platform, query in BOUNTY_SEARCH_QUERIES:
         hits = _serper_search(query, num=max_per_platform)
@@ -205,6 +475,12 @@ def scan_bounties(
                 if md:
                     brief = f"{snippet}\nURL: {url}\n\n{md[:1800]}"
             cpm, burn, min_views = _extract_metrics_from_text(f"{title}\n{brief}")
+            ok, _reason = is_valid_campaign_record(url, title, cpm, require_known_domain=True)
+            if not ok:
+                rejected_noise += 1
+                continue
+
+            audio_pol: AudioPolicy = "sound_campaign" if "sound" in f"{title} {brief}".lower() else "strict_clean"
             audit = audit_campaign_rules(
                 title=title,
                 brief_text=brief,
@@ -224,6 +500,10 @@ def scan_bounties(
                 brief_text=brief[:2400],
                 verdict="PENDING_HITL",
                 db_path=db_path,
+                geo_requirement=audit["geo_requirement"],
+                platforms="youtube_shorts,tiktok,instagram_reels,x",
+                audio_policy=audio_pol,
+                url=url,
             )
             results.append(
                 {
@@ -234,6 +514,9 @@ def scan_bounties(
                     "cpm_usd": cpm,
                     "burn_rate_pct": burn,
                     "burn_delta_pct": upsert_res["burn_delta_pct"],
+                    "geo_requirement": audit["geo_requirement"],
+                    "ar_priority_score": audit["ar_priority_score"],
+                    "audio_policy": audio_pol,
                     "verdict": upsert_res["verdict"],
                     "recommendation": audit["verdict_recommendation"],
                     "eligible_from_ar": audit["eligible_from_ar"],
@@ -242,21 +525,31 @@ def scan_bounties(
                 }
             )
 
+    results.sort(key=lambda r: (int(r["ar_priority_score"]), float(r["cpm_usd"])), reverse=True)
     insert_telemetry(
         "bounty_radar",
         "bounties_scanned",
-        {"discovered": len(results), "platforms": sorted({r["platform"] for r in results})},
+        {
+            "discovered": len(results),
+            "rejected_noise": rejected_noise,
+            "platforms": sorted({r["platform"] for r in results}),
+        },
         db_path=db_path,
     )
     return results
 
 
 def get_bounties(verdict: str | None = None, db_path: Path = DEFAULT_DB_PATH) -> list[dict[str, Any]]:
-    return list_campaigns(verdict=verdict, db_path=db_path)
+    return list_campaigns(verdict=verdict, geo_priority=True, db_path=db_path)
 
 
 def approve_bounty(campaign_id: str, verdict: str = "APPROVED", db_path: Path = DEFAULT_DB_PATH) -> bool:
     ok = set_campaign_verdict(campaign_id, verdict, db_path=db_path)
     if ok:
-        insert_telemetry("bounty_radar", "bounty_hitl_decision", {"campaign_id": campaign_id, "verdict": verdict}, db_path=db_path)
+        insert_telemetry(
+            "bounty_radar",
+            "bounty_hitl_decision",
+            {"campaign_id": campaign_id, "verdict": verdict},
+            db_path=db_path,
+        )
     return ok

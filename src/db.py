@@ -98,6 +98,10 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> Path:
                 cpm_usd REAL DEFAULT 0.0,
                 burn_rate_pct REAL DEFAULT 0.0,
                 geo_lock TEXT DEFAULT '',
+                geo_requirement TEXT DEFAULT 'global',
+                platforms TEXT DEFAULT '',
+                audio_policy TEXT DEFAULT 'strict_clean',
+                url TEXT DEFAULT '',
                 voice_policy TEXT DEFAULT 'none',
                 brief_text TEXT DEFAULT '',
                 verdict TEXT DEFAULT 'PENDING',
@@ -129,6 +133,19 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> Path:
             );
             """
         )
+        # Non-destructive column migrations for existing studio.db instances
+        clip_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(clips)").fetchall()}
+        if "status" not in clip_cols:
+            conn.execute("ALTER TABLE clips ADD COLUMN status TEXT DEFAULT 'READY_HITL'")
+        camp_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(campaigns)").fetchall()}
+        if "geo_requirement" not in camp_cols:
+            conn.execute("ALTER TABLE campaigns ADD COLUMN geo_requirement TEXT DEFAULT 'global'")
+        if "platforms" not in camp_cols:
+            conn.execute("ALTER TABLE campaigns ADD COLUMN platforms TEXT DEFAULT ''")
+        if "audio_policy" not in camp_cols:
+            conn.execute("ALTER TABLE campaigns ADD COLUMN audio_policy TEXT DEFAULT 'strict_clean'")
+        if "url" not in camp_cols:
+            conn.execute("ALTER TABLE campaigns ADD COLUMN url TEXT DEFAULT ''")
     return db_path
 
 
@@ -352,6 +369,17 @@ def search_fts(query: str, limit: int = 10, db_path: Path = DEFAULT_DB_PATH) -> 
         return [dict(r) for r in rows]
 
 
+def delete_telemetry_by_run_id(run_id: str, event_type: str | None = None, db_path: Path = DEFAULT_DB_PATH) -> int:
+    """Remove synthetic or test telemetry rows cleanly by run_id (and optional event_type)."""
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        if event_type:
+            cur = conn.execute("DELETE FROM telemetry WHERE run_id = ? AND event_type = ?", (run_id, event_type))
+        else:
+            cur = conn.execute("DELETE FROM telemetry WHERE run_id = ?", (run_id,))
+        return int(cur.rowcount)
+
+
 def upsert_campaign(
     campaign_id: str,
     platform: str,
@@ -363,6 +391,11 @@ def upsert_campaign(
     brief_text: str = "",
     verdict: str = "PENDING_HITL",
     db_path: Path = DEFAULT_DB_PATH,
+    *,
+    geo_requirement: str = "global",
+    platforms: str = "",
+    audio_policy: str = "strict_clean",
+    url: str = "",
 ) -> dict[str, Any]:
     """Upsert a bounty campaign snapshot and preserve human APPROVED/REJECTED verdict if already set."""
     init_db(db_path)
@@ -384,14 +417,19 @@ def upsert_campaign(
             """
             INSERT INTO campaigns (
                 campaign_id, platform, title, cpm_usd, burn_rate_pct, geo_lock,
+                geo_requirement, platforms, audio_policy, url,
                 voice_policy, brief_text, verdict, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(campaign_id) DO UPDATE SET
                 platform = excluded.platform,
                 title = excluded.title,
                 cpm_usd = CASE WHEN excluded.cpm_usd > 0 THEN excluded.cpm_usd ELSE campaigns.cpm_usd END,
                 burn_rate_pct = excluded.burn_rate_pct,
                 geo_lock = CASE WHEN excluded.geo_lock != '' THEN excluded.geo_lock ELSE campaigns.geo_lock END,
+                geo_requirement = CASE WHEN excluded.geo_requirement != '' THEN excluded.geo_requirement ELSE campaigns.geo_requirement END,
+                platforms = CASE WHEN excluded.platforms != '' THEN excluded.platforms ELSE campaigns.platforms END,
+                audio_policy = CASE WHEN excluded.audio_policy != '' THEN excluded.audio_policy ELSE campaigns.audio_policy END,
+                url = CASE WHEN excluded.url != '' THEN excluded.url ELSE campaigns.url END,
                 voice_policy = excluded.voice_policy,
                 brief_text = CASE WHEN excluded.brief_text != '' THEN excluded.brief_text ELSE campaigns.brief_text END,
                 verdict = excluded.verdict,
@@ -404,6 +442,10 @@ def upsert_campaign(
                 cpm_usd,
                 burn_rate_pct,
                 geo_lock,
+                geo_requirement,
+                platforms,
+                audio_policy,
+                url,
                 voice_policy,
                 brief_text,
                 final_verdict,
@@ -418,19 +460,37 @@ def upsert_campaign(
         "prev_burn_rate_pct": prev_burn,
         "burn_delta_pct": delta_burn,
         "prev_updated_at": prev_ts,
+        "geo_requirement": geo_requirement,
+        "audio_policy": audio_policy,
     }
 
 
-def list_campaigns(verdict: str | None = None, db_path: Path = DEFAULT_DB_PATH) -> list[dict[str, Any]]:
+def delete_campaign(campaign_id: str, db_path: Path = DEFAULT_DB_PATH) -> bool:
     init_db(db_path)
+    with _connect(db_path) as conn:
+        cur = conn.execute("DELETE FROM campaigns WHERE campaign_id = ?", (campaign_id,))
+        return cur.rowcount > 0
+
+
+def list_campaigns(
+    verdict: str | None = None,
+    geo_priority: bool = True,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> list[dict[str, Any]]:
+    init_db(db_path)
+    order_clause = (
+        "ORDER BY CASE geo_requirement WHEN 'global' THEN 0 WHEN 'latam' THEN 1 ELSE 2 END ASC, cpm_usd DESC, updated_at DESC"
+        if geo_priority
+        else "ORDER BY updated_at DESC"
+    )
     with _connect(db_path) as conn:
         if verdict:
             rows = conn.execute(
-                "SELECT * FROM campaigns WHERE verdict = ? ORDER BY updated_at DESC",
+                f"SELECT * FROM campaigns WHERE verdict = ? {order_clause}",
                 (verdict,),
             ).fetchall()
         else:
-            rows = conn.execute("SELECT * FROM campaigns ORDER BY updated_at DESC").fetchall()
+            rows = conn.execute(f"SELECT * FROM campaigns {order_clause}").fetchall()
         return [dict(r) for r in rows]
 
 
