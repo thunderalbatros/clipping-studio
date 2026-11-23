@@ -1,0 +1,123 @@
+{
+  "schema_version": "1.0",
+  "updated_at": "2026-11-23",
+  "streamers": {
+    "jynxzi": {
+      "display_name": "Jynxzi",
+      "language": "en",
+      "tier": "tier1_en",
+      "platforms": ["twitch"],
+      "archetype": "explosive_comedy_rage",
+      "reaction_signature": "Sudden pitch spikes, dramatic deadpan pauses before screaming, rapid chair-lean into mic, rhetorical callouts to chat.",
+      "optimal_hook_0_3s": "Open on the exact blunder, taunt, or absurd visual frame; let the 0.25s silence breathe before the scream lands.",
+      "pacing_rules": "Keep clips tight (20-38s). Preserve 0.25s Synchresis pauses before punchlines; avoid cutting his stutter-emphasis cadence.",
+      "caption_vocab_notes": "Preserve slang accurately ('bad aim', 'clipped', 'no shot', 'bro'). Never transcribe 1-letter stutters alone.",
+      "framing_and_cover_style": "High-contrast expressive face reaction on top webcam card; 2-3 word impact headline ('NO WAY', 'INSTANT KARMA').",
+      "bounty_fit": "High CPM velocity on TikTok, YT Shorts, and IG Reels (strong DM shareability)."
+    },
+    "xqc": {
+      "display_name": "xQc",
+      "language": "en",
+      "tier": "tier1_en",
+      "platforms": ["kick", "twitch", "youtube"],
+      "archetype": "high_velocity_chaos_commentary",
+      "reaction_signature": "Ultra-fast speech bursts, desk slams, stunned silence on physics bugs, instant sarcastic one-liners.",
+      "optimal_hook_0_3s": "Start mid-action or on his bold prediction ('Watch this...') right before GTA VI physics/police destroy the plan.",
+      "pacing_rules": "Target 25-45s. Trim dead driving segments >0.95s, but never clip his rapid-fire rant mid-clause.",
+      "caption_vocab_notes": "High ASR challenge due to fast delivery; drop unintelligible filler syllables rather than hallucinating wrong words. Keep 'chat', 'dud', 'cooked'.",
+      "framing_and_cover_style": "Clean webcam crop with dynamic gameplay chaos below; bold curiosity-gap text ('HE LOST IT ALL', 'COOKED IN 3 SEC').",
+      "bounty_fit": "Top Tier-1 EN retention and high Kick 1080p60 VOD availability."
+    },
+    "caseoh_": {
+      "display_name": "CaseOh",
+      "language": "en",
+      "tier": "tier1_en",
+      "platforms": ["twitch", "youtube"],
+      "archetype": "wholesome_panic_jumpscare_comedy",
+      "reaction_signature": "Escalating disbelief, fake bans on chat ('mods ban him'), huge jumpscare reactions, instant comedic timing with NPCs.",
+      "optimal_hook_0_3s": "Lead with the bizarre NPC encounter, threat, or chat roast trigger right before his explosive disbelief.",
+      "pacing_rules": "Target 22-42s. Strong seamless loop potential when cutting right on his peak 'WHAT?!' or chair bounce.",
+      "caption_vocab_notes": "Keep clean humor intact; bleep any rare profanity in 0-7.5s to preserve TikTok OCR/FYF eligibility.",
+      "framing_and_cover_style": "Wide expressive eyes / hands-on-head reaction frame; crisp warm-yellow accent word ('WHO DID THIS', 'BANNED').",
+      "bounty_fit": "Extreme IG Reels Sends-Per-Reach and family-safe YouTube Shorts VVSA."
+    },
+    "kaicenat": {
+      "display_name": "Kai Cenat",
+      "language": "en",
+      "tier": "tier1_en",
+      "platforms": ["twitch", "youtube"],
+      "archetype": "cinematic_hype_group_chaos",
+      "reaction_signature": "Full-body reactions, standing up from chair, Discord/co-op banter, marathon high-stakes GTA VI missions.",
+      "optimal_hook_0_3s": "Open on the high-stakes wager, betrayal, or cinematic explosion — never on lobby setup.",
+      "pacing_rules": "Target 28-52s for multi-beat storytelling with co-op twists. Verify active speaker with LR-ASD when guests appear.",
+      "caption_vocab_notes": "Subtitles track Kai + Discord friends; exclude GTA VI NPC dialogue. Watch for licensed club/radio music in marathons (strict YAMNet check).",
+      "framing_and_cover_style": "High-energy standing/pointing reaction cutout for 16:9 Text-Behind-Subject; energetic 2-3 word punchline in 9:16 safe box.",
+      "bounty_fit": "Massive Tier-1 viral ceiling and ideal anchor for 8+ min YouTube Long-Form compilations."
+    },
+    "ishowspeed": {
+      "display_name": "IShowSpeed",
+      "language": "en",
+      "tier": "tier1_en",
+      "platforms": ["youtube"],
+      "archetype": "maximum_energy_spectacle",
+      "reaction_signature": "Zero-to-100 emotional swings, close-up camera leans, iconic disbelief stares, chaotic driving and police chases.",
+      "optimal_hook_0_3s": "Immediate visual motion at t=0.0s (crash, near-miss, absurd glitch) paired with instant audio energy.",
+      "pacing_rules": "Target 18-36s. Aggressive compression control in FFmpeg (loudnorm -14 LUFS / <= -1.0 dBTP) to prevent mic clipping.",
+      "caption_vocab_notes": "Keep captions <= 3 words per pop; apply strict 0-7.5s profanity bleeper + OCR text redaction.",
+      "framing_and_cover_style": "Close-up wide-eyed reaction frame wins Squint Test at 160px; concise 2-word contrast headline ('NO SHOT', 'TOO LATE').",
+      "bounty_fit": "Highest global cross-platform velocity; ideal for X native video and Shorts."
+    },
+    "westcol": {
+      "display_name": "WestCOL",
+      "language": "es",
+      "tier": "latam_es",
+      "platforms": ["kick"],
+      "archetype": "latam_charisma_banter",
+      "reaction_signature": "Colombian slang banter, competitive bets with friends, expressive disbelief and comedic roast exchanges.",
+      "optimal_hook_0_3s": "Open on the direct challenge, bet, or unexpected betrayal in Vice City.",
+      "pacing_rules": "Target 25-48s. Keep natural Spanish conversational rhythm; avoid over-chopping group laughs.",
+      "caption_vocab_notes": "Spanish LATAM vocabulary; transcribe idioms accurately and filter profanity in 0-7.5s for TikTok/FB Reels.",
+      "framing_and_cover_style": "Clean Kick 1080p60 gameplay + sharp top webcam card; punchy Spanish 2-4 word cover hook.",
+      "bounty_fit": "Strong LATAM ES ClipBoom / Kick bounty volume."
+    },
+    "ibai": {
+      "display_name": "Ibai",
+      "language": "es",
+      "tier": "es",
+      "platforms": ["twitch", "youtube"],
+      "archetype": "caster_storytelling_comedy",
+      "reaction_signature": "Sports-caster escalation, hilarious narration of mundane GTA failures, crisp comedic timing with co-streamers.",
+      "optimal_hook_0_3s": "Start at the exact moment his confident narration collides with immediate disaster.",
+      "pacing_rules": "Target 30-55s; supports slightly longer narrative setups because his vocal pacing holds retention.",
+      "caption_vocab_notes": "Clear Castilian Spanish ASR; exclude game subtitles and preserve comedic inflection.",
+      "framing_and_cover_style": "Editorial broadcast aesthetic, crisp Montserrat Black hook with APCA >= 75 over subtle scrim.",
+      "bounty_fit": "High ES/LATAM YouTube Shorts and Facebook Reels share rate."
+    },
+    "elrubius": {
+      "display_name": "Rubius",
+      "language": "es",
+      "tier": "es",
+      "platforms": ["twitch", "youtube"],
+      "archetype": "absurd_sandbox_explorer",
+      "reaction_signature": "Curiosity-driven sandbox experiments, iconic deadpan looks at camera, chaotic physics discovery.",
+      "optimal_hook_0_3s": "Open on the experiment premise ('What happens if...') and cut swiftly to the absurd GTA VI physics payoff.",
+      "pacing_rules": "Target 24-45s. Great candidate for single surgical freeze-frame callout (0.7s) at peak ragdoll/glitch.",
+      "caption_vocab_notes": "Mix of Spanish and gaming English terms ('bug', 'clip', 'GG'); keep subtitles clean and uncluttered.",
+      "framing_and_cover_style": "Deadpan webcam stare contrasting explosive gameplay frame; curiosity-gap 2-3 word hook.",
+      "bounty_fit": "High organic shareability in ES/LATAM Shorts and IG Reels."
+    },
+    "illojuan": {
+      "display_name": "IlloJuan",
+      "language": "es",
+      "tier": "es",
+      "platforms": ["twitch", "youtube"],
+      "archetype": "deep_lore_immersive_comedy",
+      "reaction_signature": "Observational humor about Rockstar details, Andalusian comedic delivery, genuine immersion and plot reactions.",
+      "optimal_hook_0_3s": "Open directly on the subtle Rockstar detail, visual Easter egg, or comedic misinterpretation.",
+      "pacing_rules": "Target 30-60s (ideal for story/detail clips and Long-Form compilation bridges). Respect Synchresis comedic beats.",
+      "caption_vocab_notes": "Andalusian Spanish phonetic nuances; verify ASR fidelity on proper nouns and GTA VI lore terms.",
+      "framing_and_cover_style": "Clean editorial framing highlighting Rockstar world details + focused reaction; zero visual clutter.",
+      "bounty_fit": "Strong YouTube Long-Form bridge audience and high completion rate on detail/lore Shorts."
+    }
+  }
+}

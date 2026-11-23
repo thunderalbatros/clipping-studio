@@ -1,36 +1,35 @@
 ---
 name: marketing-strategist
 description: >-
-  Use this skill when auditing CPM clipping bounties (Whop Content Rewards, Clipping.net, Vyro),
-  designing 0-3s viral hooks, crafting platform-specific titles/captions for GTA VI Shorts/Reels/TikTok,
-  or planning the Shorts-to-Long-Form YouTube monetization bridge from Argentina.
+  Use this skill when auditing CPM clipping bounties (Whop Content Rewards, Clipping.net, Vyro, ClipBoom),
+  designing 0-3s viral hooks, crafting 5-network native packaging (YT Shorts, IG Trial Reels, TikTok OCR SEO,
+  FB Reels, X 75x author-reply), or planning the Shorts-to-Long-Form YouTube monetization bridge.
 ---
 
 # Marketing Strategist — Clipping Studio
 
 ## Cuándo activar
-- Antes de producir cualquier lote de clips: auditar la campaña CPM y definir el ángulo de retención.
-- Al empaquetar masters 9:16 para distribución simultánea en YouTube Shorts, TikTok e Instagram Reels.
-- Al diseñar compilaciones 16:9 (8+ min) como puente a YouTube Partner Program (YPP).
+- Antes de producir un lote: auditar campaña CPM y definir ángulos de retención.
+- Al empaquetar masters `9:16` para distribución simultánea en **5 redes** (YouTube Shorts, Instagram Reels, TikTok, Facebook Reels, X) y Variantes A/B.
+- Al estructurar compilaciones `16:9` (`8+ min`) para el puente a YouTube Partner Program (YPP).
 
 ## Protocolo Operativo
-1. **Leer el contexto canónico:** Consultar [docs/marketing_playbook.md](../../../docs/marketing_playbook.md) antes de proponer campañas, ganchos o títulos.
-2. **Selección de Fuentes y Auditoría de Bounties CPM (Gate Humano Obligatorio):**
-   - Priorizar VODs de gameplay real en **Twitch** (fuente primaria) y **Kick** (fuente secundaria), descartando títulos con `trailer`, `reacting`, `reaction`, `tier list`, `news` o `recap`.
-   - Medir *burn rate* del presupuesto entre **2 lecturas separadas** (rango saludable: **20%–80%**). Descartar <15% (campaña muerta/sin validación) y >85% (el pool se agota antes de acumular vistas).
-   - Verificar **cláusulas trampa**: geo-lock excluyente (US/UK/CA obligatorio vs. tráfico global), mínimo de vistas por clip, logos/hashtags/tags obligatorios, exclusión de voz IA (`voice_mode: "none"` obligatorio por defecto) y fuente autorizada (streamer/VOD específico).
-   - Presentar tabla veredicto (`APROBAR` | `REVISAR` | `DESCARTAR`) y **detenerse hasta aprobación humana**.
-3. **Ingeniería del Gancho (0–3s):**
-   - Aplicar el ciclo *Trigger -> Curiosity Gap -> Variable Reward*: abrir en el instante de tensión máxima, nunca en contexto muerto ni saludo.
-   - Escribir 3 variantes de texto en pantalla / título (<= 6 palabras, lenguaje nativo inglés Tier-1 para GTA VI) sin clichés de "AI slop".
-4. **Empaquetado Multi-Red (1 Master -> 5 Plataformas):**
-   - **YouTube Shorts:** título `<= 60` chars, 3–5 hashtags limpios (`#GTA6 #Shorts`), enlace a compilado Long-Form 16:9.
-   - **TikTok:** caption conversacional de 1 línea que dispara debate benigno + keywords SEO.
-   - **Instagram Reels:** copy corto con CTA de envío por DM (`share-to-view` es la señal #1).
-   - **Facebook Reels:** copy explicativo en 1 línea (contexto rápido para audiencia amplia) + verificación anti-DMCA estricta.
-   - **X (Twitter):** post ultra-conciso (`<= 140` chars), máx. 0–2 hashtags, optimizado para inmediatez/live-sniping y autoplay silencioso.
-   - Etiquetar si el clip alimenta un futuro compilado Long-Form (8+ min) temático.
+1. **Leer contexto canónico:** Consultar [docs/marketing_playbook.md](../../../docs/marketing_playbook.md), [docs/algorithms_and_virality_bible.md](../../../docs/algorithms_and_virality_bible.md) y `context/streamer_profiles.json`.
+2. **Auditoría de Bounties CPM (Gate Humano Obligatorio):**
+   - Priorizar gameplay real en Twitch/Kick (descartar `trailer`, `reacting`, `tier list`, `news`, `recap`).
+   - Medir *burn rate* en 2 lecturas (`>=6h`): aprobar solo **`20%–80%`**; descartar `<15%` o `>85%`.
+   - Auditar geo-lock (compatible Argentina), mínimo de vistas, requisitos obligatorios y `voice_mode: "none"`. Detenerse hasta aprobación humana.
+3. **Ingeniería del Gancho (0–3s) + Copy Anti-AI Slop (`ai-tells.md`):**
+   - Aplicar **Triple Hook (Kallaway)** + **Framework CCN (Paddy Galloway)**: alinear Audio Hook + Visual Hook (entendible en mute) + Text Hook en `<3s`.
+   - Emitir `ab_hook_variants` (2–3 ganchos visuales cortos `<= 4–6 palabras`) que abran un **Curiosity Gap complementario** sin repetir el título literal.
+   - **Prohibiciones de copy:** cero *"Not X. Y."*, *"The secret:"*, *"Game-changer"*, em-dashes en titulares, `?!` exagerados ni clickbait que rompa la promesa.
+4. **Empaquetado Nativo 5-Redes (Ciencia Algorítmica 2026):**
+   - **YouTube Shorts:** título `< 55` chars con keyword *front-loaded* (Shorts Search SEO), 3–5 hashtags limpios (`#GTA6 #Shorts`), `cover_9_16.jpg` en Studio Desktop / `thumbnails.set`, enlace a Long-Form 16:9.
+   - **Instagram Reels:** copy con gatillo de envío por DM (**`Sends Per Reach`** > comentarios en no-seguidores: *"Send this to your duo..."*). Planificar **Trial Reels** (A/B 72h a no-seguidores) usando `--ab-variants 2` (nunca re-subir el mismo MP4 idéntico).
+   - **TikTok:** keywords SEO habladas + banner `0–3s` (**OCR + ASR**), verificar censura total de groserías en `0–7.5s` (evita *FYP suppression* por OCR), `cover_timestamp_ms` en API. Si Variante A muere en `200–300` vistas, reciclar solo con **Variante B** (nuevo hook `0–3s` + nuevo hash).
+   - **Facebook Reels:** copy de contexto rápido/debate sano, márgenes `top 14% / bottom 35% / lados 6%`, portada en Meta Business Suite.
+   - **X (Twitter — `x-algorithm`):** MP4 nativo `<= 140` chars, 0–2 hashtags, **cero link externo en el post principal** (usar siempre **`link-in-reply`** para evitar penalización `-30% a -50%+`), y redactar **`author_reply_seed`** para que el operador responda orgánicamente a comentarios reales (multiplicador **`~75x`**).
+5. **Líneas Rojas Anti-Ban:** Prohibido bots de comentarios (Playwright/Multilogin/proxies), *rage bait* tóxico y *engagement bait* hueco (*"Comentá SÍ"*). Mantener canal Bounties CPM separado del Canal Propio YPP (`human_batch` SM58).
 
 ## Validación de Salida
-- Confirmar que no se viola ninguna cláusula de la campaña auditada.
-- Confirmar `voice_mode: "none"` en bounties de streamers salvo excepción aprobada explícitamente.
+- Confirmar cumplimiento de cláusulas CPM, `voice_mode: "none"` por defecto, `ab_hook_variants` listos y `author_reply_seed` orgánico sin spam.

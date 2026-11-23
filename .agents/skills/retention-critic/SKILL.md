@@ -1,36 +1,39 @@
 ---
 name: retention-critic
 description: >-
-  Use this skill when performing multimodal QA on rendered clips using ffmpeg-mcp-lite frame extraction,
-  evaluating 5-axis watchability/pacing/safe-zones (Samsung Galaxy A36), verifying -14 LUFS audio,
-  and enforcing anti-DMCA and anti-AI-slop release gates before publication.
+  Use this skill when performing multimodal QA on rendered clips and editorial covers/thumbnails
+  using ffmpeg-mcp-lite frame extraction, evaluating 5-axis watchability/pacing/safe-zones
+  (Samsung Galaxy A36), Squint Test 160px, Spectral Saliency, APCA contrast, -14 LUFS audio,
+  and anti-DMCA/anti-AI-slop release gates before publication.
 ---
 
 # Retention Critic — Clipping Studio
 
 ## Cuándo activar
-- Después de cada render de clip candidato y **antes** de mover el master 9:16 a la carpeta de publicación.
+- Después de cada render de clip `9:16`, portada `cover_9_16.jpg` o miniatura `thumbnail_1280x720.jpg`, y **antes** de aprobar la publicación.
 
 ## Protocolo de Evaluación (Gate de Salida)
-1. **Inspección Técnica (`[RUNTIME REAL]` vía `ffmpeg-mcp-lite` / `ffprobe`):**
-   - Confirmar resolución exacta `1080x1920` (9:16), `pix_fmt=yuv420p`, FPS constante (30/60), duración objetivo y pista de audio sin clipping (`<= -1.0 dBTP`, target `-14.0 LUFS`).
-   - Extraer **4–6 frames clave en PNG/WebP** (segundo `0.2`, `1.5`, `3.0`, punto medio, pico de acción y cierre `-0.5s`) — nunca subir el MP4 completo al VLM salvo fallo crítico.
-2. **Auditoría Visual de Safe-Zones 2026 (5 Redes sobre `1080x1920`):**
-   - Priorizar la inspección directa de `*_safezones.png` generados por `evals/media_check.py`.
-   - **Capa Ámbar (TikTok / IG Reels / FB Reels):** `top 180px`, `right 150px`, `bottom 400px` (`450px` en FB Reels). La tarjeta webcam debe iniciar bajo `y = 180` y los ojos/boca quedar libres.
-   - **Capa Roja (YouTube Shorts / Universal 5 redes):** `top 288px` (15%), `right 192px` (18%), `bottom 672px` (35%), `left 48px` (4%). Todo subtítulo `Montserrat Black` y callout debe quedar dentro de `[48..888, 288..1248]`.
-   - **X (Twitter):** verificar que el frame `0.0–0.5s` tenga impacto visual/textual claro en autoplay silencioso.
-   - **Filtro obligatorio de escena y monetización:** Rechazar todo candidato donde `scene_type != "active_gameplay"` en campañas de gameplay, verificar **cero groserías sin bleep en `0.0–7.5s`**, **cero tartamudeos de 1 letra (`"J"`)** y **cero subtítulos duplicados de NPCs**.
-3. **Compuertas Binarias de Crítico Ciego (patrón ClipKaro + `CHECKED BY CODE`):**
-   - **Pre-chequeo determinista (`CHECKED BY CODE`):** Antes del VLM/LLM, verificar por código que no haya corte a mitad de frase, falso arranque ni frame negro/congelado en `0.0–1.5s`.
-   - **Gate 1 — `alone` (Test del Desconocido):** ¿Alguien que no vio el stream entiende en <3s qué pasa sin pronombres huérfanos ("that thing", "he")? Si falla -> **RECHAZAR o pedir Cold Open**.
-   - **Gate 2 — `ending` (Cierre Completo revisando `AFTER THE CLIP`):** Comparar el cierre con los 3 segundos posteriores del transcript (`AFTER THE CLIP`); si el remate/punchline quedó afuera o corta una idea a medias -> **AJUSTAR `end_trim`**.
-4. **Rúbrica de 5 Ejes (0.0 a 1.0 — Umbral de aprobación `overall >= 0.75`):**
-   - `hook_3s`: ¿El segundo `0.0–3.0` arranca en acción/reacción real con Open Loop claro, sin frame congelado ni preámbulo muerto?
-   - `pacing`: ¿Hay ritmo de acordeón emocional (tensión/liberación) sin dead air ni sobre-cortes frenéticos tipo "AI slop"?
-   - `visual_framing`: ¿La webcam, el gameplay y los subtítulos karaoke son nítidos y respetan safe-zones?
-   - `audio_dmca_safety`: ¿Audio limpio (`-14 LUFS`, `<= -1.0 dBTP`), voz entendible, cero música licenciada de radio GTA VI audible y `voice_mode` conforme a campaña?
-   - `packaging_fit`: ¿El título/gancho cumple las reglas del bounty CPM o el puente a YouTube Long-Form?
-5. **Bucle de Retroalimentación Acotado:**
-   - Si `overall < 0.75` o falla una compuerta binaria, emitir feedback puntual y accionable para `av-director` / `media-engineer`.
-   - **Límite duro:** `max_retries = 1`. Si falla en el segundo intento, **descartar el clip** (no quemar tokens intentando salvar footage mediocre).
+1. **Inspección Técnica de Video (`[RUNTIME REAL]` vía `ffmpeg-mcp-lite` / `ffprobe`):**
+   - Confirmar resolución exacta `1080x1920` (9:16), `pix_fmt=yuv420p`, FPS constante (30/60), duración objetivo y audio limpio (`-14.0 LUFS`, `<= -1.0 dBTP`).
+   - Extraer **4–6 frames clave en PNG/WebP** (`0.2s`, `1.5s`, `3.0s`, medio, pico de acción y cierre `-0.5s`); nunca subir el MP4 completo al VLM salvo fallo crítico.
+2. **Auditoría de Safe-Zones de Video (5 Redes sobre `1080x1920`):**
+   - Inspeccionar `*_safezones.png` (`evals/media_check.py`).
+   - **Capa Ámbar (TikTok / IG / FB):** `top 180px`, `right 150px`, `bottom 400px` (`450px` en FB). Tarjeta webcam bajo `y = 180` con ojos/boca libres.
+   - **Capa Roja (YT Shorts / Universal 5 redes):** todo subtítulo `Montserrat Black` y callout dentro de `[48..888, 288..1248]`.
+   - **X:** confirmar impacto visual/textual claro en `0.0–0.5s` en autoplay silencioso.
+   - **Filtros duros:** `scene_type == "active_gameplay"`, **cero groserías sin bleep/censura OCR en `0.0–7.5s`**, cero tartamudeos de 1 letra y cero subtítulos duplicados de NPCs.
+3. **Gate Visual de Portadas `9:16` y Miniaturas `16:9` (Método C + `seam-gate`):**
+   - **Dimensiones exactas (`PIL.Image.size`):** `(1080, 1920)` en `cover_9_16.jpg` y `(1280, 720)` en `thumbnail_1280x720.jpg` (cero recorte DPI, cero pillarbox negro en `16:9`).
+   - **Tipografía y Contraste:** confirmar visualmente **`Montserrat Black`** sin fallback, **`APCA Lc >= 75`**, máximo 2–4 palabras complementarias al título y cero AI-tells.
+   - **Squint Test (`*_squint_160px.jpg`):** sujeto y texto legibles instantáneamente a `160px` de ancho.
+   - **Caja Segura Universal 4-Redes (`*_crop_preview.jpg`):** texto y rostro íntegros simultáneamente en **Instagram `3:4`** y **TikTok `1:1`** (`[90..990, 420..1250]`).
+   - **Saliencia Pre-Atentiva (`*_saliency_heatmap.jpg`):** confirmar que el foco FFT 2D cae sobre rostro + texto dentro de la Caja Segura (`>= 55%` de masa saliente).
+   - **Chequeo `seam-gate`:** verificar que no existan costuras rotas, halos sucios de recorte `BiRefNet-lite` ni texto chocando contra bordes/rostro.
+4. **Compuertas Binarias de Crítico Ciego (ClipKaro `honesty` / `wordcheck` + `CHECKED BY CODE`):**
+   - **`CHECKED BY CODE`:** verificar cero corte a mitad de frase, cero falso arranque, cero frame congelado/negro en `0.0–1.5s`.
+   - **`alone` (Test del Desconocido):** ¿alguien ajeno al stream entiende en `<3s` sin pronombres huérfanos?
+   - **`ending` (`AFTER THE CLIP`):** revisar los 3s posteriores del transcript para confirmar cierre completo y *Seamless Loop* limpio.
+   - **`wordcheck`:** confirmar que el transcript/subtítulos y titulares no inventan hechos ni lore inexistente en el clip.
+5. **Rúbrica de 5 Ejes (0.0 a 1.0 — Umbral `overall >= 0.75`, `max_retries = 1`):**
+   - `hook_3s`, `pacing`, `visual_framing`, `audio_dmca_safety`, `packaging_fit`.
+   - Si falla en el reintento (`max_retries = 1`), **descartar el clip** y registrar feedback en `runs/studio.db` para alimentar la memoria episódica del RAG.
