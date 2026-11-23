@@ -11,7 +11,7 @@ import tempfile
 import wave
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import onnx_asr
@@ -24,13 +24,14 @@ from src.db import upsert_slice, upsert_transcript_fts
 from src.miner import CHANNEL_PROFILE_PATH, PROJECT_ROOT, RUNS_DIR, enforce_runs_quota
 from src.schemas import (
     AnnotatedTranscript,
+    AudioPolicy,
     CandidateSlice,
     NonVerbalEvent,
     RunState,
     WordTimestamp,
 )
 
-_MODEL_CACHE: dict[str, object] = {}
+_MODEL_CACHE: dict[str, Any] = {}
 YAMNET_MODEL_PATH = PROJECT_ROOT / "models" / "yamnet" / "yamnet.onnx"
 YAMNET_CLASS_MAP_PATH = PROJECT_ROOT / "models" / "yamnet" / "yamnet_class_map.csv"
 DMCA_MUSIC_THRESHOLD = 0.45
@@ -106,7 +107,7 @@ def _group_segment_words(
     if not tokens or not timestamps:
         return []
 
-    raw_words: list[dict[str, object]] = []
+    raw_words: list[dict[str, Any]] = []
     for idx, tok in enumerate(tokens):
         ts_rel = float(timestamps[idx]) if idx < len(timestamps) else 0.0
         abs_t = round(max(0.0, min(seg_end, seg_start + ts_rel)), 3)
@@ -425,8 +426,57 @@ def generate_contact_sheet(video_path: Path, out_png: Path, interval_sec: float 
     return out_png
 
 
-def transcribe_slice(candidate: CandidateSlice, run_dir: Path, auto_cleanup_temp: bool = True) -> AnnotatedTranscript:
-    """Run CPU int8 Parakeet + Silero VAD, pure YAMNet ONNX anti-DMCA, and Contact-Sheet PNG."""
+def evaluate_audio_policy_yamnet(
+    music_prob_peak: float,
+    audio_policy: AudioPolicy = "strict_clean",
+    threshold: float = DMCA_MUSIC_THRESHOLD,
+) -> tuple[bool, bool, str]:
+    """Evaluate YAMNet music probability under 3-mode policy -> `(dmca_flag, needs_demucs_rescue, dmca_advisory)`."""
+    has_music = float(music_prob_peak) >= threshold
+    if audio_policy == "keep_original":
+        advisory = (
+            f"keep_original_advisory: YAMNet music_prob_peak={music_prob_peak:.3f} (>={threshold}) "
+            "retained with -14 LUFS loudnorm (no rejection)"
+            if has_music
+            else f"keep_original: clean audio (music_prob_peak={music_prob_peak:.3f})"
+        )
+        return False, False, advisory
+    if audio_policy == "sound_campaign":
+        if has_music:
+            return (
+                True,
+                True,
+                f"sound_campaign: foreign background music detected (peak={music_prob_peak:.3f}) — "
+                "clean audio required to sync Official Sound in-app",
+            )
+        return False, False, "sound_campaign: clean audio verified; ready for Official Sound in-app sync at climax"
+    # strict_clean (default for 16:9 YPP / multi-platform safe distribution)
+    if has_music:
+        return (
+            True,
+            True,
+            f"strict_clean: licensed music detected (peak={music_prob_peak:.3f} >= {threshold}) — "
+            "avoid window or queue Carril 2 Colab T4 Demucs rescue",
+        )
+    return False, False, ""
+
+
+def _estimate_visual_climax_sec(events: list[NonVerbalEvent], duration_sec: float) -> float:
+    """Estimate peak impact timestamp (seconds) from shouting/laughter peaks for Sound Campaign sync."""
+    peaks = [ev for ev in events if ev.kind in {"shouting", "laughter", "visual_motion"}]
+    if peaks:
+        best = max(peaks, key=lambda e: float(e.intensity))
+        return round(max(0.5, min(max(0.5, duration_sec - 0.5), (best.start + best.end) * 0.5)), 2)
+    return round(max(0.5, duration_sec * 0.45), 2)
+
+
+def transcribe_slice(
+    candidate: CandidateSlice,
+    run_dir: Path,
+    auto_cleanup_temp: bool = True,
+    audio_policy: AudioPolicy = "strict_clean",
+) -> AnnotatedTranscript:
+    """Run CPU int8 Parakeet + Silero VAD, pure YAMNet ONNX 3-mode audio policy, and Contact-Sheet PNG."""
     audio_path = Path(candidate.slice_audio_path) if candidate.slice_audio_path else None
     video_path = Path(candidate.slice_video_path)
     if audio_path is None or not audio_path.exists():
@@ -464,7 +514,9 @@ def transcribe_slice(candidate: CandidateSlice, run_dir: Path, auto_cleanup_temp
 
     samples, sr = _read_wav_mono_16k(audio_path)
     dur_sec = round(len(samples) / float(sr), 2) if sr else candidate.duration_sec
-    events, music_prob_peak, dmca_flag, top_events, detector = _analyze_acoustics_and_dmca(samples, sr, all_words)
+    events, music_prob_peak, _raw_dmca_flag, top_events, detector = _analyze_acoustics_and_dmca(samples, sr, all_words)
+    dmca_flag, needs_demucs, dmca_advisory = evaluate_audio_policy_yamnet(music_prob_peak, audio_policy=audio_policy)
+    climax_sec = _estimate_visual_climax_sec(events, dur_sec)
 
     sheet_path = run_dir / f"{candidate.slice_id}_contact_sheet.png"
     generate_contact_sheet(video_path, sheet_path, interval_sec=10.0)
@@ -479,6 +531,10 @@ def transcribe_slice(candidate: CandidateSlice, run_dir: Path, auto_cleanup_temp
         dmca_flag=dmca_flag,
         yamnet_top_events=top_events,
         dmca_detector=detector,
+        audio_policy=audio_policy,
+        dmca_advisory=dmca_advisory,
+        needs_demucs_rescue=needs_demucs,
+        visual_climax_sec=climax_sec,
         contact_sheet_path=str(sheet_path),
         duration_sec=dur_sec,
     )
@@ -491,11 +547,13 @@ def transcribe_slice(candidate: CandidateSlice, run_dir: Path, auto_cleanup_temp
     return transcript
 
 
-def transcribe_run(run_dir: Path) -> RunState:
+def transcribe_run(run_dir: Path, audio_policy: AudioPolicy | None = None) -> RunState:
     """Transcribe all mined slices in a run directory, update state.json and studio.db FTS5."""
     load_dotenv(override=True)
     state_path = run_dir / "state.json"
     state = RunState.model_validate_json(state_path.read_text(encoding="utf-8"))
+    eff_policy: AudioPolicy = audio_policy or state.audio_policy or "strict_clean"
+    state.audio_policy = eff_policy
 
     auto_cleanup = True
     if CHANNEL_PROFILE_PATH.exists():
@@ -504,7 +562,7 @@ def transcribe_run(run_dir: Path) -> RunState:
 
     transcripts: list[AnnotatedTranscript] = []
     for cand in state.candidates:
-        tr = transcribe_slice(cand, run_dir, auto_cleanup_temp=auto_cleanup)
+        tr = transcribe_slice(cand, run_dir, auto_cleanup_temp=auto_cleanup, audio_policy=eff_policy)
         transcripts.append(tr)
         upsert_slice(
             run_id=state.run_id,

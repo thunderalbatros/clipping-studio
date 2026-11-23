@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 
 from src.schemas import EditPlan
 
@@ -52,14 +52,13 @@ def _compose_adaptive_9_16(src_img: Image.Image, layout: dict[str, Any] | None, 
 
     if layout and layout.get("is_framed_card") and layout.get("webcam_card_size"):
         card_w, card_h = layout["webcam_card_size"]
-        bg = gp_crop.resize((1080, 692), Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(radius=18)).convert("RGBA")
-        dark = Image.new("RGBA", (1080, 692), (0, 0, 0, 75))
-        top_band = Image.alpha_composite(bg, dark)
+        # Clean neutral dark studio backdrop (zero blurred gameplay / ghost HUD bleed)
+        top_band = Image.new("RGBA", (1080, 692), (10, 12, 18, 255))
         card = cam_crop.resize((card_w, card_h), Image.Resampling.LANCZOS).convert("RGBA")
         mask = Image.new("L", (card_w, card_h), 0)
         ImageDraw.Draw(mask).rounded_rectangle([0, 0, card_w - 1, card_h - 1], radius=26, fill=255)
         px = (1080 - card_w) // 2
-        py = max(0, min(692 - card_h - 10, max(172, 692 - card_h - 16)))
+        py = max(0, min(692 - card_h - 10, max(180, 692 - card_h - 16)))
         top_band.paste(card, (px, py), mask)
         ImageDraw.Draw(top_band).rounded_rectangle(
             [px, py, px + card_w - 1, py + card_h - 1], radius=26, outline=(245, 248, 255, 165), width=4
@@ -127,7 +126,6 @@ def render_freeze_callout(
     )
     composed = Image.alpha_composite(canvas, dark_layer)
     draw = ImageDraw.Draw(composed)
-    draw.rectangle([bx0, by0, bx1, by1], outline=(0, 229, 255, 245), width=5)
 
     label = ff.callout_text.upper()
     font = _load_font(54)

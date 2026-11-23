@@ -168,9 +168,12 @@ def generate_karaoke_ass(
         if w.end <= clip_start + 0.02 or w.start >= clip_end - 0.02:
             continue
         norm = re.sub(r"[^\w']", "", w.word.lower())
+        norm_alpha = re.sub(r"[^a-z]", "", w.word.lower())
         if not norm or norm in _FILLERS:
             continue
         if len(norm) == 1 and norm not in _ALLOWED_SINGLE_LETTERS:
+            continue
+        if len(norm_alpha) == 1 and not any(ch.isdigit() for ch in norm) and norm_alpha not in _ALLOWED_SINGLE_LETTERS:
             continue
         raw_s = max(0.0, round(w.start - clip_start, 3))
         raw_e = max(raw_s + 0.06, round(w.end - clip_start, 3))

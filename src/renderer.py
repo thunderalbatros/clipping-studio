@@ -27,7 +27,7 @@ from src.miner import (
 )
 from src.resource_guard import apply_thread_budget
 from src.schemas import AnnotatedTranscript, EditPlan, WordTimestamp
-from src.speaker_guard import detect_face_center_ultraface
+from src.speaker_guard import detect_face_center_ultraface, score_streamer_speech_asd
 
 _JSON_BLOCK_RE = re.compile(r"\{[^{}]*\"input_i\"[^{}]*\}", re.DOTALL)
 _FONTSELECT_RE = re.compile(r"fontselect:\s*\(([^)]+)\)", re.IGNORECASE)
@@ -48,7 +48,9 @@ def rects_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) ->
 def compute_webcam_card_pos(card_w: int, card_h: int) -> tuple[int, int]:
     """Anchor rounded webcam card cleanly below TikTok/Reels y=180 top bar and centered inside top 692px band."""
     px = (1080 - card_w) // 2
-    py = max(0, min(692 - card_h - 10, max(172, 692 - card_h - 16)))
+    max_y = max(0, 692 - card_h - 10)
+    ideal_y = max(180, 692 - card_h - 16)
+    py = min(max_y, ideal_y)
     return px, py
 
 
@@ -547,32 +549,52 @@ def compute_adaptive_layout(
 
     target_ar = 1080.0 / 1228.0
     ideal_gw = _even(round(src_h * target_ar))
+    ideal_x = _even((src_w - ideal_gw) // 2)
     cam_center_x = wx + ww * 0.5
+    screen_cx = src_w // 2
 
     if cam_center_x < src_w * 0.5:
         avail_w = src_w - forb[2]
-        if avail_w >= ideal_gw:
-            gw, gh = ideal_gw, _even(src_h)
-            ideal_x = (src_w - gw) // 2
-            gx = _even(max(forb[2], min(src_w - gw, ideal_x)))
-            gy = 0
+        if ideal_x >= forb[2] and ideal_x + ideal_gw <= src_w:
+            gw, gh, gx, gy = ideal_gw, _even(src_h), ideal_x, 0
         else:
-            gw = _even(max(200, avail_w))
-            gh = _even(min(src_h, round(gw / target_ar)))
-            gx = _even(forb[2])
-            gy = _even((src_h - gh) // 2)
+            sym_half = screen_cx - forb[2]
+            sym_gw = _even(max(0, sym_half * 2))
+            if sym_gw >= 560:
+                gw = min(ideal_gw, sym_gw)
+                gh = _even(min(src_h, round(gw / target_ar)))
+                gx = _even(max(forb[2], screen_cx - gw // 2))
+                gy = _even((src_h - gh) // 2)
+            elif avail_w >= ideal_gw:
+                gw, gh = ideal_gw, _even(src_h)
+                gx = _even(max(forb[2], min(src_w - gw, ideal_x)))
+                gy = 0
+            else:
+                gw = _even(max(200, avail_w))
+                gh = _even(min(src_h, round(gw / target_ar)))
+                gx = _even(forb[2])
+                gy = _even((src_h - gh) // 2)
     else:
         avail_w = forb[0]
-        if avail_w >= ideal_gw:
-            gw, gh = ideal_gw, _even(src_h)
-            ideal_x = (src_w - gw) // 2
-            gx = _even(max(0, min(forb[0] - gw, ideal_x)))
-            gy = 0
+        if ideal_x >= 0 and ideal_x + ideal_gw <= forb[0]:
+            gw, gh, gx, gy = ideal_gw, _even(src_h), ideal_x, 0
         else:
-            gw = _even(max(200, avail_w))
-            gh = _even(min(src_h, round(gw / target_ar)))
-            gx = 0
-            gy = _even((src_h - gh) // 2)
+            sym_half = forb[0] - screen_cx
+            sym_gw = _even(max(0, sym_half * 2))
+            if sym_gw >= 560:
+                gw = min(ideal_gw, sym_gw)
+                gh = _even(min(src_h, round(gw / target_ar)))
+                gx = _even(max(0, min(forb[0] - gw, screen_cx - gw // 2)))
+                gy = _even((src_h - gh) // 2)
+            elif avail_w >= ideal_gw:
+                gw, gh = ideal_gw, _even(src_h)
+                gx = _even(max(0, min(forb[0] - gw, ideal_x)))
+                gy = 0
+            else:
+                gw = _even(max(200, avail_w))
+                gh = _even(min(src_h, round(gw / target_ar)))
+                gx = 0
+                gy = _even((src_h - gh) // 2)
 
     gp_rect = (gx, gy, gx + gw, gy + gh)
     no_overlap = not rects_overlap(gp_rect, forb)
@@ -677,6 +699,7 @@ def _build_adaptive_filter(
     bleep_spans: list[tuple[float, float]],
     sfx_inputs: list[tuple[int, int, float]],
     out_dur: float,
+    src_fps: float = 60.0,
 ) -> str:
     gx, gy, gw, gh = layout["gameplay_crop_px"]
     parts: list[str] = []
@@ -712,19 +735,16 @@ def _build_adaptive_filter(
         cx, cy, cw, ch = layout["webcam_crop_px"]
         card_w, card_h = layout["webcam_card_size"]
         need_bot_zoom = bool(punch_windows and punch_zoom > 1.02)
-        n_splits = (3 if layout["is_framed_card"] else 2) + (1 if need_bot_zoom else 0)
+        n_splits = 2 + (1 if need_bot_zoom else 0)
         split_labels = [f"[vs{i}]" for i in range(n_splits)]
         parts.append(f"[vsrc]split={n_splits}{''.join(split_labels)}")
 
         s_ptr = 0
         if layout["is_framed_card"]:
             px, py = compute_webcam_card_pos(card_w, card_h)
-            parts.append(
-                f"{split_labels[s_ptr]}crop={gw}:{gh}:{gx}:{gy},"
-                f"scale=1080:692:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:692,"
-                f"gblur=sigma=24,eq=brightness=-0.12,setsar=1[top_bg]"
-            )
-            s_ptr += 1
+            bg_fps = max(30, min(60, round(src_fps or 60.0)))
+            # Clean dark neutral studio backdrop matching source fps (zero blurred gameplay / ghost HUD bleed)
+            parts.append(f"color=c=0x0A0C12:s=1080x692:r={bg_fps}:d={out_dur + 2.0:.3f},format=yuv420p,setsar=1[top_bg]")
             parts.append(
                 f"{split_labels[s_ptr]}crop={cw}:{ch}:{cx}:{cy},"
                 f"scale={card_w}:{card_h}:flags=lanczos,unsharp=3:3:0.35,format=rgba,setsar=1[cam_raw]"
@@ -815,8 +835,15 @@ def render_master_clip(
     out_mp4: Path,
     compute_profile: str = "local_hp",
     use_auto_editor: bool = True,
+    clean_cover_out: Path | None = None,
+    enforce_speaker_guard: bool = True,
 ) -> Path:
-    """Render Senior-grade 1080x1920 H.264 clip (60fps, <=1.8x card, jump-cuts, punch-in zoom, bleeper, SFX, loudnorm)."""
+    """Render Senior-grade 1080x1920 H.264 clip (60fps, <=1.8x card, jump-cuts, punch-in zoom, bleeper, SFX, loudnorm).
+
+    When `clean_cover_out` is provided, extracts 8 pre-`libass` 9:16 frames from `[base]` BEFORE subtitle burn-in,
+    selects the sharpest/most expressive peak frame, and writes both `clean_cover_out` and `<stem>.meta.json`
+    so `DesignEngine` NEVER inherits burned captions.
+    """
     apply_thread_budget()
     cfg: dict[str, Any] = {}
     if CHANNEL_PROFILE_PATH.exists():
@@ -830,6 +857,16 @@ def render_master_clip(
     punch_zoom = min(1.15, max(1.0, float(layout_cfg.get("rms_punch_in_max_zoom", 1.12))))
     cut_silence_sec = float(clip_cfg.get("cut_silence_over_sec", 0.65))
     synchresis_sec = float(clip_cfg.get("preserve_synchresis_pause_sec", 0.25))
+
+    # Guarantee LR-ASD speaker_guard runs before captions whenever webcam exists and words are unscored
+    if (
+        enforce_speaker_guard
+        and edit_plan.webcam_box_px is not None
+        and transcript.words
+        and all(w.streamer_asd_score is None for w in transcript.words)
+    ):
+        asd_info = score_streamer_speech_asd(source_slice, edit_plan.webcam_box_px, transcript.words)
+        print(f"[RENDERER_LR_ASD] {edit_plan.clip_id}: {asd_info}")
 
     src_w, src_h, src_fps, _ = probe_video_stream(source_slice)
     src_w, src_h = src_w or 1920, src_h or 1080
@@ -980,6 +1017,7 @@ def render_master_clip(
             bleep_spans=bleep_spans,
             sfx_inputs=sfx_inputs,
             out_dur=out_dur,
+            src_fps=src_fps or 60.0,
         )
 
         base_cmd.extend([
@@ -1053,6 +1091,55 @@ def render_master_clip(
         fonts_loaded = sorted(set(_FONTSELECT_RE.findall(stderr_used)))
         if fonts_loaded:
             print(f"[RENDERER] libass fontselect={fonts_loaded[:4]}")
+
+        if clean_cover_out is not None:
+            from src.callout import _compose_adaptive_9_16
+            from src.design_engine import select_peak_cover_frame_from_dir
+
+            clean_frames_dir = work_dir / "clean_cover_frames"
+            clean_frames_dir.mkdir(parents=True, exist_ok=True)
+            # Extract 8 raw pre-libass frames directly from source_slice and compose exact 1080x1920 layout
+            sample_rel = np.linspace(min(0.8, raw_clip_dur * 0.1), max(1.0, raw_clip_dur - 1.0), 8)
+            for idx, rel_s in enumerate(sample_rel):
+                raw_p = clean_frames_dir / f"raw_{idx:02d}.png"
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-ss",
+                        f"{edit_plan.start_trim + float(rel_s):.3f}",
+                        "-i",
+                        str(source_slice.resolve()),
+                        "-frames:v",
+                        "1",
+                        str(raw_p),
+                    ],
+                    capture_output=True,
+                    check=False,
+                    timeout=20,
+                )
+                if raw_p.is_file():
+                    raw_img = Image.open(raw_p).convert("RGBA")
+                    composed_9_16 = _compose_adaptive_9_16(raw_img, layout, edit_plan.webcam_box_px).convert("RGB")
+                    composed_9_16.save(clean_frames_dir / f"clean_{idx:02d}.jpg", format="JPEG", quality=94, subsampling=0)
+                    raw_p.unlink(missing_ok=True)
+
+            cov_meta = select_peak_cover_frame_from_dir(
+                frames_dir=clean_frames_dir,
+                out_clean_jpg=clean_cover_out,
+                video_for_rms=out_mp4,
+                duration_sec=out_dur,
+            )
+            clean_cover_out.with_suffix(".meta.json").write_text(
+                json.dumps(cov_meta, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            print(
+                f"[RENDERER_CLEAN_COVER] pre_libass={clean_cover_out.name} "
+                f"ts_ms={cov_meta['cover_timestamp_ms']} face={cov_meta['face_score']}"
+            )
     finally:
         if auto_cleanup:
             shutil.rmtree(work_dir, ignore_errors=True)

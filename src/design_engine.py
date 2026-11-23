@@ -17,7 +17,9 @@ from __future__ import annotations
 import base64
 import html as html_lib
 import io
+import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -30,6 +32,7 @@ import onnxruntime as ort
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 from src.miner import PROJECT_ROOT, probe_video_stream
+from src.rag_engine import query_rag
 from src.resource_guard import onnx_threads
 from src.speaker_guard import detect_faces_ultraface
 
@@ -47,6 +50,171 @@ SAFE_BOX_16_9 = (64, 54, 1216, 610)
 
 _REMBG_SESSIONS: dict[str, Any] = {}
 _FONT_B64_CACHE: str | None = None
+_HEADLINE_STOPWORDS = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "with",
+        "that",
+        "this",
+        "from",
+        "into",
+        "out",
+        "was",
+        "were",
+        "are",
+        "his",
+        "her",
+        "him",
+        "she",
+        "you",
+        "your",
+        "bro",
+        "gta",
+        "vi",
+        "gta6",
+        "gtavi",
+        "shorts",
+    }
+)
+_COMPLEMENTARY_FALLBACK_HOOKS = (
+    "INSTANT KARMA",
+    "WAIT FOR IT",
+    "ZERO CHANCE",
+    "WORST TIMING",
+    "NO ESCAPE",
+)
+
+
+def _content_words(text: str) -> set[str]:
+    tokens = re.findall(r"[a-z0-9]+", text.lower())
+    return {t for t in tokens if len(t) >= 3 and t not in _HEADLINE_STOPWORDS}
+
+
+def ensure_complementary_cover_headline(
+    headline: str,
+    title: str = "",
+    fallback_headlines: list[str] | None = None,
+    max_words: int = 4,
+) -> tuple[str, list[str]]:
+    """Enforce Curiosity-Gap cover copy (2-4 words) with ZERO literal content-word overlap with `title`."""
+    clean_primary = " ".join(headline.strip().split())
+    title_words = _content_words(title)
+
+    def _clean_short(cand: str) -> str:
+        ws = [w for w in cand.strip().split() if w][:max_words]
+        return " ".join(ws).upper()
+
+    if not title_words:
+        chosen = _clean_short(clean_primary) or "WAIT FOR IT"
+        return chosen, []
+
+    primary_short = _clean_short(clean_primary)
+    if primary_short and not (_content_words(primary_short) & title_words):
+        return primary_short, []
+
+    candidates: list[str] = []
+    if fallback_headlines:
+        candidates.extend(fallback_headlines)
+    candidates.extend(_COMPLEMENTARY_FALLBACK_HOOKS)
+
+    for cand in candidates:
+        short = _clean_short(cand)
+        if not short:
+            continue
+        if len(short.split()) < 2:
+            continue
+        if not (_content_words(short) & title_words):
+            return short, []
+
+    return "WAIT FOR IT", []
+
+
+def _query_design_ctr_rag(query: str, top_k: int = 3) -> list[dict[str, Any]]:
+    """Consult local hybrid RAG (`design_ctr` domain) for CTR / APCA / Safe-Box guidance."""
+    try:
+        hits = query_rag(query, domain="design_ctr", top_k=top_k, use_vectors=True)
+        return [
+            {
+                "chunk_id": str(h.get("chunk_id") or ""),
+                "heading": str(h.get("heading") or ""),
+                "rrf_score": float(h.get("rrf_score") or 0.0),
+            }
+            for h in hits
+        ]
+    except Exception:
+        return []
+
+
+def select_peak_cover_frame_from_dir(
+    frames_dir: Path,
+    out_clean_jpg: Path,
+    video_for_rms: Path | None = None,
+    duration_sec: float = 0.0,
+) -> dict[str, Any]:
+    """Score pre-`libass` 9:16 frames extracted directly from `[base]` (ZERO burned captions)."""
+    out_clean_jpg.parent.mkdir(parents=True, exist_ok=True)
+    frame_paths = sorted(frames_dir.glob("clean_*.jpg"))
+    if not frame_paths:
+        raise RuntimeError(f"No pre-libass clean cover frames found in {frames_dir}")
+
+    dur = max(1.0, float(duration_sec))
+    n = len(frame_paths)
+    timestamps = [round((idx + 0.5) * (dur / float(n)), 3) for idx in range(n)]
+    rms_norms = (
+        _extract_audio_rms_series(video_for_rms, timestamps)
+        if (video_for_rms is not None and video_for_rms.is_file())
+        else [0.5] * n
+    )
+
+    candidates: list[dict[str, Any]] = []
+    for idx, fp in enumerate(frame_paths):
+        img = Image.open(fp).convert("RGB")
+        sharp = _laplacian_sharpness(img)
+        luma_mean = float(np.asarray(img.convert("L"), dtype=np.float32).mean())
+        if luma_mean < 16.0:
+            sharp *= 0.1
+
+        iw, ih = img.size
+        face_roi = img.crop((0, 0, iw, min(ih, int(ih * 0.42)))) if ih > iw else img
+        face_score = 0.0
+        try:
+            faces = detect_faces_ultraface(np.asarray(face_roi, dtype=np.uint8), confidence=0.50)
+            if faces:
+                best = max(faces, key=lambda b: b[4] * (b[2] - b[0]) * (b[3] - b[1]))
+                face_score = float(best[4])
+        except Exception:
+            face_score = 0.0
+
+        candidates.append(
+            {
+                "ts": timestamps[idx],
+                "path": fp,
+                "sharpness": sharp,
+                "face_score": face_score,
+                "rms_norm": rms_norms[idx] if idx < len(rms_norms) else 0.5,
+            }
+        )
+
+    max_sharp = max(c["sharpness"] for c in candidates) or 1.0
+    for c in candidates:
+        c["total_score"] = round(0.45 * (c["sharpness"] / max_sharp) + 0.35 * c["face_score"] + 0.20 * c["rms_norm"], 4)
+
+    best_c = max(candidates, key=lambda c: c["total_score"])
+    best_img = Image.open(best_c["path"]).convert("RGB")
+    best_img.save(out_clean_jpg, format="JPEG", quality=94, subsampling=0)
+    return {
+        "cover_timestamp_ms": round(float(best_c["ts"]) * 1000.0),
+        "cover_clean_path": str(out_clean_jpg),
+        "width": best_img.size[0],
+        "height": best_img.size[1],
+        "sharpness": round(float(best_c["sharpness"]), 2),
+        "face_score": round(float(best_c["face_score"]), 3),
+        "rms_norm": round(float(best_c["rms_norm"]), 3),
+        "total_score": best_c["total_score"],
+        "pre_libass": True,
+    }
 
 
 def _get_font_base64() -> str:
@@ -392,7 +560,9 @@ def extract_subject_cutout(
             out = remove(pil_img, session=sess)
             if isinstance(out, bytes):
                 return Image.open(io.BytesIO(out)).convert("RGBA")
-            return out.convert("RGBA")
+            if isinstance(out, Image.Image):
+                return out.convert("RGBA")
+            return Image.fromarray(out).convert("RGBA")
         except Exception:
             return None
 
@@ -749,14 +919,23 @@ def _load_source_image(
     ext = video_or_img.suffix.lower()
     if ext in {".jpg", ".jpeg", ".png", ".webp"}:
         img = Image.open(video_or_img).convert("RGB")
-        if out_clean_jpg is not None:
+        if out_clean_jpg is not None and out_clean_jpg.resolve() != video_or_img.resolve():
             out_clean_jpg.parent.mkdir(parents=True, exist_ok=True)
             img.save(out_clean_jpg, format="JPEG", quality=94, subsampling=0)
+        ts_ms = 0
+        sidecar_meta = video_or_img.with_suffix(".meta.json")
+        if sidecar_meta.is_file():
+            try:
+                loaded_meta = json.loads(sidecar_meta.read_text(encoding="utf-8"))
+                ts_ms = int(loaded_meta.get("cover_timestamp_ms") or 0)
+            except Exception:
+                ts_ms = 0
         return img, {
-            "cover_timestamp_ms": 0,
+            "cover_timestamp_ms": ts_ms,
             "cover_clean_path": str(out_clean_jpg or video_or_img),
             "width": img.size[0],
             "height": img.size[1],
+            "pre_libass": True,
         }
     clean_target = out_clean_jpg or video_or_img.with_name(f"{video_or_img.stem}_cover_clean.jpg")
     meta = select_peak_cover_frame(video_or_img, clean_target, webcam_box_px=webcam_box_px)
@@ -770,11 +949,24 @@ def render_editorial_cover_9_16(
     badge_text: str = "GTA VI",
     webcam_box_px: tuple[int, int, int, int] | None = None,
     clean_cover_jpg: Path | None = None,
+    title: str = "",
+    fallback_headlines: list[str] | None = None,
+    cover_timestamp_ms_override: int | None = None,
 ) -> dict[str, Any]:
     """Render Method-C Layer 2 `1080x1920` editorial cover with Universal 4-Network Safe Box, APCA >= 75, and QA artifacts."""
+    if not BUNDLED_FONT_PATH.is_file():
+        raise FileNotFoundError(f"Montserrat Black font required without fallback: {BUNDLED_FONT_PATH}")
+
     out_jpg.parent.mkdir(parents=True, exist_ok=True)
     clean_path = clean_cover_jpg or out_jpg.with_name(out_jpg.stem.replace("_cover_9_16", "") + "_cover_clean.jpg")
     base_img, layer1 = _load_source_image(video_or_img, out_clean_jpg=clean_path, webcam_box_px=webcam_box_px)
+    if cover_timestamp_ms_override is not None and cover_timestamp_ms_override > 0:
+        layer1["cover_timestamp_ms"] = int(cover_timestamp_ms_override)
+
+    rag_hits = _query_design_ctr_rag(f"9:16 cover APCA safe box curiosity gap {headline} {badge_text}", top_k=3)
+    final_headline, overlap_words = ensure_complementary_cover_headline(
+        headline, title=title, fallback_headlines=fallback_headlines, max_words=4
+    )
 
     # Fit exact 1080x1920 (center-crop preserving aspect ratio, zero distortion)
     target_w, target_h = 1080, 1920
@@ -794,7 +986,7 @@ def render_editorial_cover_9_16(
     seam_bg_rgb = _sample_region_avg_rgb(graded, (120, 650, 960, 870))
     scrim_alpha, apca_lc = _ensure_apca_scrim_alpha(seam_bg_rgb, fg_rgb=(248, 250, 252), min_abs_lc=75.0, base_alpha=0.72)
 
-    lines = _format_headline_lines(headline, max_words=4)
+    lines = _format_headline_lines(final_headline, max_words=4)
     longest_line = max(len(ln) for ln in lines)
     font_px = 112 if longest_line <= 10 else (96 if longest_line <= 14 else 82)
     headline_html = _highlight_accent_word_html(lines, accent_hex="#FFD400")
@@ -904,8 +1096,11 @@ html, body {{
 </html>"""
 
     rendered_img, renderer_used = _render_html_to_image(html_doc, target_w, target_h)
-    assert rendered_img.size == (1080, 1920), f"Invalid 9:16 cover size: {rendered_img.size}"
     rendered_img.save(out_jpg, format="JPEG", quality=93, subsampling=0)
+    with Image.open(out_jpg) as verify_img:
+        verified_size = verify_img.size
+    if verified_size != (1080, 1920):
+        raise RuntimeError(f"Runtime PIL.Image.size check failed for 9:16 cover: got {verified_size}")
 
     # Emit mandatory deterministic QA artifacts
     stem = out_jpg.stem
@@ -922,12 +1117,16 @@ html, body {{
         "cover_path": str(out_jpg),
         "cover_clean_path": layer1["cover_clean_path"],
         "cover_timestamp_ms": layer1["cover_timestamp_ms"],
-        "dimensions": list(rendered_img.size),
+        "pre_libass": bool(layer1.get("pre_libass", False)),
+        "cover_headline_used": final_headline,
+        "title_overlap_words": overlap_words,
+        "dimensions": list(verified_size),
         "renderer": renderer_used,
         "font": "Montserrat-Black.ttf (embedded base64)",
         "apca_lc": apca_lc,
         "scrim_alpha": scrim_alpha,
         "safe_box": list(UNIVERSAL_SAFE_BOX_9_16),
+        "rag_design_hits": rag_hits,
         "saliency": saliency,
         "qa_artifacts": {
             "squint_160px": str(squint_jpg),
@@ -944,9 +1143,18 @@ def render_editorial_thumbnail_16_9(
     badge_text: str = "GTA VI",
     webcam_box_px: tuple[int, int, int, int] | None = None,
     use_matting: bool = True,
+    title: str = "",
+    fallback_headlines: list[str] | None = None,
 ) -> dict[str, Any]:
     """Render native 16:9 `1280x720` YouTube thumbnail with `rembg/birefnet-general-lite` Text-Behind-Subject + QA artifacts."""
+    if not BUNDLED_FONT_PATH.is_file():
+        raise FileNotFoundError(f"Montserrat Black font required without fallback: {BUNDLED_FONT_PATH}")
+
     out_jpg.parent.mkdir(parents=True, exist_ok=True)
+    rag_hits = _query_design_ctr_rag(f"16:9 YouTube thumbnail text behind subject APCA {headline} {badge_text}", top_k=3)
+    final_headline, overlap_words = ensure_complementary_cover_headline(
+        headline, title=title, fallback_headlines=fallback_headlines, max_words=4
+    )
     clean_tmp = out_jpg.with_name(f"{out_jpg.stem}_source_frame.jpg")
     base_img, layer1 = _load_source_image(video_or_img, out_clean_jpg=clean_tmp, webcam_box_px=webcam_box_px)
     bw, bh = base_img.size
@@ -1047,7 +1255,7 @@ def render_editorial_thumbnail_16_9(
     bg_rgb = _sample_region_avg_rgb(bg_canvas, text_sample_box)
     scrim_alpha, apca_lc = _ensure_apca_scrim_alpha(bg_rgb, fg_rgb=(248, 250, 252), min_abs_lc=75.0, base_alpha=0.58)
 
-    lines = _format_headline_lines(headline, max_words=4)
+    lines = _format_headline_lines(final_headline, max_words=4)
     longest_line = max(len(ln) for ln in lines)
     font_px = 152 if longest_line <= 9 else (130 if longest_line <= 13 else 112)
     headline_html = _highlight_accent_word_html(lines, accent_hex="#FFD400")
@@ -1189,8 +1397,11 @@ html, body {{
 </html>"""
 
     rendered_img, renderer_used = _render_html_to_image(html_doc, target_w, target_h)
-    assert rendered_img.size == (1280, 720), f"Invalid 16:9 thumbnail size: {rendered_img.size}"
     rendered_img.save(out_jpg, format="JPEG", quality=93, subsampling=0)
+    with Image.open(out_jpg) as verify_img:
+        verified_size = verify_img.size
+    if verified_size != (1280, 720):
+        raise RuntimeError(f"Runtime PIL.Image.size check failed for 16:9 thumbnail: got {verified_size}")
     clean_tmp.unlink(missing_ok=True)
 
     stem = out_jpg.stem
@@ -1206,12 +1417,15 @@ html, body {{
         "format": "16_9",
         "thumbnail_path": str(out_jpg),
         "cover_timestamp_ms": layer1["cover_timestamp_ms"],
-        "dimensions": list(rendered_img.size),
+        "cover_headline_used": final_headline,
+        "title_overlap_words": overlap_words,
+        "dimensions": list(verified_size),
         "renderer": renderer_used,
         "font": "Montserrat-Black.ttf (embedded base64)",
         "apca_lc": apca_lc,
         "scrim_alpha": scrim_alpha,
         "matting": matting_meta,
+        "rag_design_hits": rag_hits,
         "saliency": saliency,
         "qa_artifacts": {
             "squint_160px": str(squint_jpg),

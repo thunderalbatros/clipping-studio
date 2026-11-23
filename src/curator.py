@@ -21,6 +21,7 @@ from src.miner import CHANNEL_PROFILE_PATH, PROJECT_ROOT, STREAMERS_PATH
 from src.rag_engine import build_curator_rag_context
 from src.schemas import (
     AnnotatedTranscript,
+    AudioPolicy,
     BlindCriticResult,
     CandidateSlice,
     ClipPackaging,
@@ -182,22 +183,64 @@ def _extract_zoom_strip_1fps(video_path: Path, start_sec: float, duration_sec: f
     return out_png
 
 
-def _apply_pass1_hard_gates(audit: SliceAuditResult, transcript: AnnotatedTranscript) -> SliceAuditResult:
+def _apply_pass1_hard_gates(
+    audit: SliceAuditResult,
+    transcript: AnnotatedTranscript,
+    audio_policy: AudioPolicy = "strict_clean",
+) -> SliceAuditResult:
+    audit.audio_policy = audio_policy
     if audit.scene_type != "active_gameplay":
         audit.approved_for_pass2 = False
-        if transcript.dmca_flag:
+        if transcript.dmca_flag and audio_policy != "keep_original":
             audit.dmca_clear = False
         if not audit.rationale:
             audit.rationale = f"Rejected: scene_type={audit.scene_type} != active_gameplay."
 
     sug_dur = max(0.0, audit.suggested_end_sec - audit.suggested_start_sec)
-    if transcript.dmca_flag and (not audit.dmca_clear or sug_dur > 60.0):
-        audit.dmca_clear = False
-        audit.approved_for_pass2 = False
-        audit.dmca_risk_reason = (
-            audit.dmca_risk_reason
-            or f"Rejected by YAMNet anti-DMCA gate: music_prob_peak={transcript.music_prob_peak} (>={0.45})"
-        )
+    win_has_music = any(
+        ev.kind == "music_spike"
+        and ev.end > audit.suggested_start_sec
+        and ev.start < audit.suggested_end_sec
+        for ev in transcript.non_verbal_events
+    )
+    high_music = transcript.music_prob_peak >= 0.45
+
+    if audio_policy == "keep_original":
+        # Advisory-only mode: never reject clip for background music; keep original audio with -14 LUFS loudnorm
+        audit.dmca_clear = True
+        audit.needs_demucs_rescue = False
+        if high_music or win_has_music:
+            audit.dmca_advisory = (
+                f"keep_original_advisory: YAMNet music_prob_peak={transcript.music_prob_peak:.3f} "
+                "(retained with -14 LUFS loudnorm)"
+            )
+        else:
+            audit.dmca_advisory = "keep_original: low music probability, retained with -14 LUFS loudnorm"
+    elif audio_policy == "sound_campaign":
+        # Sound Campaigns require clean audio without foreign background music so Official Sound syncs cleanly in-app
+        if (transcript.dmca_flag or win_has_music) and (not audit.dmca_clear or win_has_music or sug_dur > 60.0):
+            audit.dmca_clear = False
+            audit.approved_for_pass2 = False
+            audit.needs_demucs_rescue = True
+            audit.dmca_risk_reason = (
+                audit.dmca_risk_reason
+                or f"Rejected by sound_campaign gate: foreign music detected (peak={transcript.music_prob_peak})"
+            )
+            audit.dmca_advisory = "sound_campaign: foreign music clashes with Official Sound sync"
+        else:
+            audit.dmca_advisory = "sound_campaign: clean audio verified — sync Official Sound in-app at visual climax"
+    else:
+        # strict_clean (default for 16:9 YPP / zero auto-muting distribution)
+        if transcript.dmca_flag and (not audit.dmca_clear or sug_dur > 60.0):
+            audit.dmca_clear = False
+            audit.approved_for_pass2 = False
+            audit.needs_demucs_rescue = True
+            audit.dmca_risk_reason = (
+                audit.dmca_risk_reason
+                or f"Rejected by YAMNet anti-DMCA gate: music_prob_peak={transcript.music_prob_peak} (>={0.45})"
+            )
+            audit.dmca_advisory = "strict_clean: queued for Carril 2 Colab T4 Demucs rescue"
+
     if not audit.dmca_clear:
         audit.approved_for_pass2 = False
     elif (
@@ -240,13 +283,14 @@ def audit_slice_pass1(
     transcript: AnnotatedTranscript,
     streamer_id: str,
     brief: str | None = None,
+    audio_policy: AudioPolicy = "strict_clean",
 ) -> SliceAuditResult:
-    """Pass 1: Multimodal audit (scene_type, webcam bbox on single 16:9 ref frame, YAMNet DMCA, GTA VI lore)."""
+    """Pass 1: Multimodal audit (scene_type, webcam bbox on single 16:9 ref frame, YAMNet 3-mode policy, GTA VI lore)."""
     video_path = Path(cand.slice_video_path)
     vw, vh, vdur = _probe_video_geometry(video_path)
     sheet_path = Path(transcript.contact_sheet_path) if transcript.contact_sheet_path else video_path.with_name(f"{cand.slice_id}_contact_sheet.png")
     ref_frame_path = _extract_single_ref_frame(video_path, min(max(2.0, vdur * 0.25), max(2.0, vdur - 2.0)), video_path.with_name(f"{cand.slice_id}_ref_frame.png"))
-    images: list[tuple[Path, str]] | None = []
+    images: list[bytes | Path | str | tuple[bytes | Path | str, str]] | None = []
     if sheet_path.exists():
         images.append((sheet_path, "MEDIA_RESOLUTION_MEDIUM"))
     if ref_frame_path is not None:
@@ -309,11 +353,11 @@ def audit_slice_pass1(
     min_start = 1.0 if (cand.platform == "kick" and cand.signal_source == "kick_clips_rank" and vdur >= 24.0) else 0.0
     audit.suggested_start_sec = max(min_start, min(max(min_start, vdur - 18.0), audit.suggested_start_sec))
     audit.suggested_end_sec = max(audit.suggested_start_sec + 16.0, min(vdur, audit.suggested_end_sec))
-    return _apply_pass1_hard_gates(audit, transcript)
+    return _apply_pass1_hard_gates(audit, transcript, audio_policy=audio_policy)
 
 
 def _checked_by_code(plan: EditPlan, transcript: AnnotatedTranscript, max_dur: float) -> tuple[bool, list[str]]:
-    """Hard deterministic code gate: duration, anti-DMCA, anti-meta-talk, speech density, and weak openers."""
+    """Hard deterministic code gate: duration, anti-DMCA (3-mode), anti-meta-talk, speech density, and weak openers."""
     issues: list[str] = []
     dur = plan.end_trim - plan.start_trim
     if dur < 16.0 or dur > 58.0:
@@ -322,7 +366,7 @@ def _checked_by_code(plan: EditPlan, transcript: AnnotatedTranscript, max_dur: f
         issues.append(f"end_trim {plan.end_trim:.2f} > slice duration {max_dur:.2f}")
     if plan.scene_type != "active_gameplay":
         issues.append(f"scene_type={plan.scene_type} != active_gameplay")
-    if not plan.dmca_clear:
+    if plan.audio_policy != "keep_original" and not plan.dmca_clear:
         issues.append(f"dmca_clear=False ({plan.dmca_risk_reason})")
 
     all_in_window = [w for w in transcript.words if w.end > plan.start_trim and w.start < plan.end_trim]
@@ -408,6 +452,28 @@ def _run_blind_critic(
     return critic
 
 
+def _compute_sound_campaign_climax_ms(
+    start_trim: float,
+    end_trim: float,
+    transcript: AnnotatedTranscript,
+    freeze_frame: FreezeFrameSpec | None,
+) -> int:
+    """Compute exact visual/action climax timestamp (ms from clip start) for Official Sound sync."""
+    clip_dur = max(1.0, end_trim - start_trim)
+    if freeze_frame is not None and 0.5 <= freeze_frame.timestamp_sec <= clip_dur - 0.5:
+        return round(freeze_frame.timestamp_sec * 1000.0)
+    in_clip = [
+        ev
+        for ev in transcript.non_verbal_events
+        if ev.kind in {"shouting", "laughter", "visual_motion"} and ev.end > start_trim and ev.start < end_trim
+    ]
+    if in_clip:
+        best = max(in_clip, key=lambda e: float(e.intensity))
+        rel = max(0.5, min(clip_dur - 0.5, ((best.start + best.end) * 0.5) - start_trim))
+        return round(rel * 1000.0)
+    return round(clip_dur * 0.45 * 1000.0)
+
+
 def curate_pass2_slice(
     cand: CandidateSlice,
     transcript: AnnotatedTranscript,
@@ -417,6 +483,7 @@ def curate_pass2_slice(
     brief: str | None = None,
     max_retries: int = 1,
     streamer_id: str = "",
+    audio_policy: AudioPolicy = "strict_clean",
 ) -> tuple[EditPlan | None, BlindCriticResult]:
     """Pass 2: Run LR-ASD speaker separation, 1fps zoom strip TrimRefiner, CHECKED BY CODE & Blind Critic."""
     video_path = Path(cand.slice_video_path)
@@ -514,6 +581,12 @@ def curate_pass2_slice(
                 duration_sec=min(1.0, max(0.6, ff.duration_sec)),
             )
 
+        climax_ms = (
+            _compute_sound_campaign_climax_ms(s_trim, e_trim, transcript, ff)
+            if audio_policy == "sound_campaign"
+            else None
+        )
+        eff_dmca_clear = True if audio_policy == "keep_original" else (audit.dmca_clear and prop.dmca_clear)
         plan = EditPlan(
             clip_id=f"clip_{cand.slice_id[-2:]}",
             slice_id=cand.slice_id,
@@ -531,8 +604,12 @@ def curate_pass2_slice(
             webcam_box_2d=audit.webcam_box_2d,
             webcam_box_px=audit.webcam_box_px,
             freeze_frame=ff,
-            dmca_clear=audit.dmca_clear and prop.dmca_clear,
+            dmca_clear=eff_dmca_clear,
             dmca_risk_reason=prop.dmca_risk_reason or audit.dmca_risk_reason,
+            audio_policy=audio_policy,
+            dmca_advisory=audit.dmca_advisory or transcript.dmca_advisory,
+            needs_demucs_rescue=audit.needs_demucs_rescue or transcript.needs_demucs_rescue,
+            sound_campaign_climax_ms=climax_ms,
             self_contained_score=prop.self_contained_score,
             rationale=prop.rationale,
         )
@@ -596,14 +673,41 @@ def generate_clip_packaging(plan: EditPlan, transcript: AnnotatedTranscript, str
             system_instruction=sys_inst,
         )
     pkg.clip_id = plan.clip_id
-    pkg.bounty_safe = bool(plan.dmca_clear and plan.voice_mode == "none")
+    pkg.audio_policy = plan.audio_policy
+    pkg.dmca_advisory = plan.dmca_advisory
+    pkg.sound_campaign_climax_ms = plan.sound_campaign_climax_ms
+    if plan.audio_policy == "sound_campaign" and plan.sound_campaign_climax_ms is not None:
+        pkg.sound_sync_note = (
+            f"Sync Official Campaign Sound in-app at {plan.sound_campaign_climax_ms} ms "
+            f"({plan.sound_campaign_climax_ms / 1000.0:.2f}s visual climax)."
+        )
+    pkg.bounty_safe = bool((plan.dmca_clear or plan.audio_policy == "keep_original") and plan.voice_mode == "none")
+
+    from src.design_engine import ensure_complementary_cover_headline
+
+    fallbacks = list(pkg.ab_hook_variants)
+    if plan.freeze_frame is not None:
+        fallbacks.append(plan.freeze_frame.callout_text)
+    comp_hook, _ = ensure_complementary_cover_headline(
+        pkg.suggested_on_screen_hook,
+        title=pkg.shorts_title,
+        fallback_headlines=fallbacks,
+        max_words=4,
+    )
+    pkg.suggested_on_screen_hook = comp_hook
     return pkg
 
 
-def curate_run(run_dir: Path, brief: str | None = None) -> RunState:
+def curate_run(
+    run_dir: Path,
+    brief: str | None = None,
+    audio_policy: AudioPolicy | None = None,
+) -> RunState:
     """Run Pass-1 + LR-ASD + Pass-2 curation over all transcribed slices in runs/<run_id>/."""
     state_path = run_dir / "state.json"
     state = RunState.model_validate_json(state_path.read_text(encoding="utf-8"))
+    eff_policy: AudioPolicy = audio_policy or state.audio_policy or "strict_clean"
+    state.audio_policy = eff_policy
 
     voice_mode = os.getenv("VOICE_MODE", "none").strip() or "none"
     if CHANNEL_PROFILE_PATH.exists():
@@ -619,7 +723,7 @@ def curate_run(run_dir: Path, brief: str | None = None) -> RunState:
         tr = tr_map.get(cand.slice_id)
         if not tr:
             continue
-        audit = audit_slice_pass1(cand, tr, state.streamer_id, brief=brief)
+        audit = audit_slice_pass1(cand, tr, state.streamer_id, brief=brief, audio_policy=eff_policy)
         audits.append(audit)
         upsert_slice(
             run_id=state.run_id,
@@ -662,6 +766,7 @@ def curate_run(run_dir: Path, brief: str | None = None) -> RunState:
             brief=brief,
             max_retries=1,
             streamer_id=state.streamer_id,
+            audio_policy=eff_policy,
         )
         critics.append(critic)
         print(

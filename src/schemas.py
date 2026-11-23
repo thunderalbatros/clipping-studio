@@ -15,6 +15,7 @@ SceneType = Literal[
 ]
 
 LayoutMode = Literal["split_webcam_top", "full_gameplay_9_16"]
+AudioPolicy = Literal["strict_clean", "sound_campaign", "keep_original"]
 
 
 class WordTimestamp(BaseModel):
@@ -83,6 +84,10 @@ class AnnotatedTranscript(BaseModel):
     dmca_flag: bool = False
     yamnet_top_events: list[dict[str, float | str]] = Field(default_factory=list)
     dmca_detector: Literal["yamnet_onnx", "fft_fallback"] = "yamnet_onnx"
+    audio_policy: AudioPolicy = "strict_clean"
+    dmca_advisory: str = ""
+    needs_demucs_rescue: bool = False
+    visual_climax_sec: float | None = None
     contact_sheet_path: str | None = None
     duration_sec: float = Field(default=0.0, ge=0.0)
 
@@ -122,6 +127,9 @@ class SliceAuditResult(BaseModel):
     webcam_box_px: tuple[int, int, int, int] | None = None
     dmca_clear: bool = True
     dmca_risk_reason: str = ""
+    audio_policy: AudioPolicy = "strict_clean"
+    dmca_advisory: str = ""
+    needs_demucs_rescue: bool = False
     approved_for_pass2: bool = False
     suggested_start_sec: float = Field(default=0.0, ge=0.0)
     suggested_end_sec: float = Field(default=30.0, gt=0.0)
@@ -159,6 +167,10 @@ class EditPlan(BaseModel):
     freeze_frame: FreezeFrameSpec | None = None
     dmca_clear: bool = True
     dmca_risk_reason: str = ""
+    audio_policy: AudioPolicy = "strict_clean"
+    dmca_advisory: str = ""
+    needs_demucs_rescue: bool = False
+    sound_campaign_climax_ms: int | None = None
     self_contained_score: int = Field(ge=0, le=100)
     rationale: str = ""
 
@@ -187,6 +199,10 @@ class ClipPackaging(BaseModel):
     x_post_text: str = ""
     matched_lore_entity: str | None = None
     bounty_safe: bool = True
+    audio_policy: AudioPolicy = "strict_clean"
+    dmca_advisory: str = ""
+    sound_campaign_climax_ms: int | None = None
+    sound_sync_note: str = ""
     cover_timestamp_ms: int = 0
     cover_clean_path: str = ""
     cover_9_16_path: str = ""
@@ -255,6 +271,7 @@ class RunState(BaseModel):
     run_id: str
     source_url: str
     streamer_id: str
+    audio_policy: AudioPolicy = "strict_clean"
     stage: Literal["initialized", "mined", "transcribed", "curated", "rendered", "reviewed", "failed"]
     candidates: list[CandidateSlice] = Field(default_factory=list)
     transcripts: list[AnnotatedTranscript] = Field(default_factory=list)
