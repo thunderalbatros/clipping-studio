@@ -1,0 +1,12 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Ignore virtualenv, read-only cloned _references, runtime artifacts, and gitignored .env"
+paths = [
+  '''^\.venv/''',
+  '''^_references/''',
+  '''^runs/''',
+  '''^\.env$''',
+  '''^\.env\.example$''',
+]

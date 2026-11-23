@@ -1,0 +1,41 @@
+# Antigravity IDE Indexer Ignore Rules — Clipping Studio
+# Excluye repositorios de referencia, secretos, entornos y medios pesados del indexado global.
+
+# Secretos y credenciales
+.env
+.env.*
+!.env.example
+*cookies*.txt
+*.pem
+*.key
+*credentials*.json
+*service-account*.json
+
+# Repositorios de referencia (solo lectura, nunca indexar como codigo propio)
+_references/
+
+# Ejecuciones y medios pesados
+runs/
+tmp/
+temp/
+*.mp4
+*.mkv
+*.mov
+*.webm
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.png
+*.jpg
+*.webp
+
+# Modelos y entornos
+.venv/
+models/
+weights/
+.cache/
+__pycache__/
+*.onnx
+*.pt
+*.safetensors

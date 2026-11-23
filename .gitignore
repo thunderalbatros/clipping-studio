@@ -1,0 +1,75 @@
+# ==============================================================================
+# Clipping Studio — .gitignore (Seguridad y Secretos desde el Minuto 0)
+# ==============================================================================
+
+# Secretos, credenciales y sesiones
+.env
+.env.*
+!.env.example
+*cookies*.txt
+*.cookie
+*.pem
+*.key
+*service-account*.json
+*credentials*.json
+gcp-key*.json
+.browser_profile/
+playwright_state/
+session_state/
+
+# Repositorios de referencia (solo lectura, excluidos de codigo propio)
+_references/
+
+# Artefactos de ejecucion y medios pesados (nunca versionar video/audio bruto)
+runs/
+tmp/
+temp/
+scratch/
+*.mp4
+*.mkv
+*.mov
+*.webm
+*.avi
+*.flv
+*.ts
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.aac
+*.ogg
+*.opus
+*.pcm
+*.part
+*.ytdl
+
+# Modelos, pesos y caches ML
+models/
+weights/
+checkpoints/
+*.onnx
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.ckpt
+.cache/
+.hf_cache/
+
+# Entornos Python / Node
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+*.bak

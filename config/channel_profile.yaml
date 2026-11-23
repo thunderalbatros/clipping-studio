@@ -1,0 +1,62 @@
+# Clipping Studio — Channel Profile Declarativo (v1 Modo B-Lite GTA VI)
+# Cambiar este archivo escala a nuevos canales/nichos sin modificar codigo en src/.
+
+channel:
+  id: "gta6_clips_en_v1"
+  language: "en"
+  target_market: "tier1_en" # US / UK / CA / AU
+  studio_mode: "streamer_gta6_lite"
+  monetization_goal: "cpm_bounty" # cpm_bounty | ypp_bridge | editorial
+
+voice:
+  # Bounties CPM: "none" por defecto (no pisar reaccion original del streamer).
+  # YPP / Editorial: "human_batch" (Shure SM58 + Mackie Onyx) o "tts" (pocket-tts / VoxCPM2).
+  mode: "none"
+  cold_open_max_words: 12
+  cold_open_max_sec: 3.5
+  ducking_db: -18.0 # J-cut voice-over sobre accion ya en curso
+
+clip_rules:
+  min_duration_sec: 20
+  target_duration_sec: 35
+  max_duration_sec: 58 # Para Multi-POV >60s usar perfil dedicado
+  min_self_contained_score: 75
+  min_reviewer_score: 0.75
+  max_review_retries: 1
+  dmca_strict_reject: true
+  cut_silence_over_sec: 0.45
+  preserve_synchresis_pause_sec: 0.25 # Micro-silencio previo a impacto/remate (Michel Chion)
+
+layout_9_16:
+  width: 1080
+  height: 1920
+  fps: 30
+  webcam_band_ratio: 0.36 # 36% webcam / 64% gameplay
+  webcam_position: "top"  # top | bottom
+  rms_punch_in_max_zoom: 1.15
+  safe_zones:
+    top_pct: 14
+    right_pct: 15
+    bottom_pct: 22
+    left_pct: 6
+
+captions:
+  engine: "libass"
+  font_name: "Segoe UI Black" # Verificada en C:\Windows\Fonts
+  font_size: 74
+  max_words_per_chunk: 3
+  primary_color: "&H00FFFFFF"
+  highlight_color: "&H0000E5FF" # Acento 2% (90/8/2)
+  outline_color: "&H00000000"
+  outline_width: 4
+  skip_npc_dialogue: true # Patron ClipKaro: no duplicar subtitulos nativos de GTA VI
+
+audio:
+  target_lufs: -14.0
+  true_peak_dbtp: -1.0
+  highpass_hz: 70
+  sample_rate: 48000
+
+storage:
+  runs_max_gb: 4.0
+  auto_cleanup_temp: true

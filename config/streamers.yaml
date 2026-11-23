@@ -1,0 +1,16 @@
+# Clipping Studio — Streamer Presets (Modo B-Lite GTA VI)
+# Coordenadas normalizadas (0..1000) o pixeles 1920x1080 para evitar trackers OpenCV fragiles en Dia 1.
+# Si webcam_box es null, curator.py puede auto-detectarla en 1 llamada con Gemini 2D Spatial Bounding Box.
+
+streamers:
+  example_streamer:
+    display_name: "Example Streamer"
+    platform: "youtube" # youtube | twitch | kick
+    clipping_permission_verified: false # Gate humano obligatorio antes de producir
+    bounty_campaign_id: null
+    source_resolution: [1920, 1080]
+    # Formato [x, y, w, h] en pixeles del VOD 1080p, o null para auto-deteccion 1-shot via Gemini Vision
+    webcam_box: null
+    # Formato [x, y, w, h] zona segura del gameplay sin HUD tapado (null = centro automatico)
+    gameplay_crop_box: null
+    notes: "Completar con streamers aprobados de campañas Whop / Clipping.net / Vyro."
