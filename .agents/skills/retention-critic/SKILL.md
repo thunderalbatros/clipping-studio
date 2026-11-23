@@ -15,12 +15,12 @@ description: >-
 1. **Inspección Técnica (`[RUNTIME REAL]` vía `ffmpeg-mcp-lite` / `ffprobe`):**
    - Confirmar resolución exacta `1080x1920` (9:16), `pix_fmt=yuv420p`, FPS constante (30/60), duración objetivo y pista de audio sin clipping (`<= -1.0 dBTP`, target `-14.0 LUFS`).
    - Extraer **4–6 frames clave en PNG/WebP** (segundo `0.2`, `1.5`, `3.0`, punto medio, pico de acción y cierre `-0.5s`) — nunca subir el MP4 completo al VLM salvo fallo crítico.
-2. **Auditoría Visual de Safe-Zones 2026 (Doble Capa sobre `1080x1920` en HP 250 G8):**
+2. **Auditoría Visual de Safe-Zones 2026 (5 Redes sobre `1080x1920`):**
    - Priorizar la inspección directa de `*_safezones.png` generados por `evals/media_check.py`.
-   - **Capa Ámbar (TikTok / Reels):** `top 180px`, `right 150px`, `bottom 400px`.
-   - **Capa Roja (YouTube Shorts / Universal 3 redes):** `top 288px` (15%), `right 192px` (18%), `bottom 672px` (35%), `left 48px` (4%). Todo subtítulo karaoke y callout debe quedar dentro de la caja segura universal despejada (`x` en `[48, 888]`, `y` en `[288, 1248]`).
-   - **Filtro obligatorio de escena:** Rechazar inmediatamente todo candidato donde `scene_type != "active_gameplay"` en campañas de gameplay (cero tráilers, menús o reacciones a otros videos).
-   - **Cero rostros cortados** y **cero subtítulos duplicados** sobre subtítulos nativos de GTA VI.
+   - **Capa Ámbar (TikTok / IG Reels / FB Reels):** `top 180px`, `right 150px`, `bottom 400px` (`450px` en FB Reels). La tarjeta webcam debe iniciar bajo `y = 180` y los ojos/boca quedar libres.
+   - **Capa Roja (YouTube Shorts / Universal 5 redes):** `top 288px` (15%), `right 192px` (18%), `bottom 672px` (35%), `left 48px` (4%). Todo subtítulo `Montserrat Black` y callout debe quedar dentro de `[48..888, 288..1248]`.
+   - **X (Twitter):** verificar que el frame `0.0–0.5s` tenga impacto visual/textual claro en autoplay silencioso.
+   - **Filtro obligatorio de escena y monetización:** Rechazar todo candidato donde `scene_type != "active_gameplay"` en campañas de gameplay, verificar **cero groserías sin bleep en `0.0–7.5s`**, **cero tartamudeos de 1 letra (`"J"`)** y **cero subtítulos duplicados de NPCs**.
 3. **Compuertas Binarias de Crítico Ciego (patrón ClipKaro + `CHECKED BY CODE`):**
    - **Pre-chequeo determinista (`CHECKED BY CODE`):** Antes del VLM/LLM, verificar por código que no haya corte a mitad de frase, falso arranque ni frame negro/congelado en `0.0–1.5s`.
    - **Gate 1 — `alone` (Test del Desconocido):** ¿Alguien que no vio el stream entiende en <3s qué pasa sin pronombres huérfanos ("that thing", "he")? Si falla -> **RECHAZAR o pedir Cold Open**.

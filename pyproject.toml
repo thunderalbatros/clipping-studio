@@ -1,0 +1,44 @@
+[project]
+name = "clipping-studio"
+version = "2.5.0"
+description = "Automated Senior-grade 9:16 & 16:9 viral clipping studio (anti-AI slop, 1080p60, LR-ASD, YAMNet ONNX, Live Sniper)"
+requires-python = ">=3.12"
+dependencies = [
+    "curl-cffi>=0.17.0",
+    "google-genai>=3.6.1",
+    "huggingface-hub>=2.4.0",
+    "numpy>=2.5.0",
+    "onnx-asr>=0.12.0",
+    "onnxruntime>=1.32.0",
+    "openai>=3.57.0",
+    "pillow>=13.0.0",
+    "pydantic>=2.14.0",
+    "pysubs2>=1.9.1",
+    "python-dotenv>=1.2.0",
+    "pyyaml>=6.0.4",
+    "requests>=2.34.0",
+    "tenacity>=9.1.0",
+    "websockets>=17.4",
+    "yt-dlp>=2026.10.26",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "ruff>=0.17.0",
+]
+
+[project.scripts]
+clipping-studio = "src.cli:main"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 128
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "FURB", "RUF"]
+ignore = ["E501", "RUF001", "RUF005", "UP047"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

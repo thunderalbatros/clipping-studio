@@ -1,0 +1,137 @@
+{
+  "schema_version": "1.0",
+  "updated_at": "2026-11-23",
+  "platforms": {
+    "youtube_shorts": {
+      "architecture": "Pull system -> Two-Tower Candidate Generation (co-watching) -> MMoE Multitask Ranking (Engagement vs Viewer Satisfaction Surveys)",
+      "primary_gates": {
+        "vvsa_viral_pct": 70.0,
+        "vvsa_fail_pct": 50.0,
+        "apv_target_pct": 100.0,
+        "ideal_duration_sec": [20, 45]
+      },
+      "key_levers": [
+        "Frame-0 instant action (zero dead air or greeting)",
+        "Seamless loop cut right on climax resolution (prevents 20-25% final-second drop)",
+        "Shorts Search SEO: front-loaded title <=55 chars + spoken ASR keywords + 3-5 hashtags",
+        "Zero cross-platform watermarks"
+      ],
+      "monetization_compliance": {
+        "bounties_channel_voice_mode": "none",
+        "owned_ypp_channel_voice_mode": "human_batch",
+        "reused_content_rule": "YPP human review evaluates entire channel; raw streamer clips with only captions/TTS fail Reused/Inauthentic Content even with creator permission."
+      },
+      "cover_spec": {
+        "canvas_px": [1080, 1920],
+        "desktop_custom_upload": true,
+        "api_method": "youtube.thumbnails.set (call after video processing finishes)",
+        "home_crop_risk": "4:5 centered"
+      }
+    },
+    "instagram_reels": {
+      "architecture": "Meta AI Staged Distribution + Andromeda Deep Semantic Retrieval + UTIS Satisfaction Surveys + Originality Score",
+      "primary_gates": {
+        "rank_1_signal": "watch_time_and_rewatch_rate",
+        "rank_2_unconnected_signal": "sends_per_reach_dm_shares",
+        "rank_3_signal": "likes_per_reach"
+      },
+      "key_levers": [
+        "DM-shareable hook and CTA ('Send this to your duo...')",
+        "Trial Reels native 72h cold-audience A/B testing for distinct 0-3s hook variants",
+        "Zero TikTok/CapCut watermarks (preserves Originality Score)"
+      ],
+      "penalties": [
+        "Hollow engagement bait ('Comment YES')",
+        "Reposting identical MP4 repeatedly in Trial Reels",
+        "Unoriginal aggregator watermarks"
+      ],
+      "cover_spec": {
+        "canvas_px": [1080, 1920],
+        "profile_grid_crop": "3:4 (1080x1440 centered)",
+        "feed_crop": "4:5",
+        "ui_safe_margins_pct": {"top": 14, "bottom": 35, "sides": 6}
+      }
+    },
+    "tiktok": {
+      "architecture": "ByteDance Monolith (Cuckoo HashMap collisionless embedding tables + Kafka/Flink real-time streaming updates + MMoE fine-ranking)",
+      "primary_gates": {
+        "seed_batch_views": [200, 500],
+        "core_signals": ["3s_hold", "completion_rate", "rewatch_rate", "shares", "saves", "conversational_comments"]
+      },
+      "key_levers": [
+        "Triple-indexed TikTok Search SEO: spoken ASR + on-screen OCR text + caption",
+        "Safe A/B recycling: transform 0-3s hook, on-screen banner, and re-encode hash before reposting failed variant",
+        "Strict 0-7.5s profanity bleeper + OCR text masking to prevent automated FYF suppression"
+      ],
+      "penalties": [
+        "OCR-flagged profanity/sensitive words",
+        "Duplicate perceptual hash re-uploads",
+        "Competitor watermarks",
+        "Bot comments / coordinated sock-puppet engagement"
+      ],
+      "cover_spec": {
+        "canvas_px": [1080, 1920],
+        "profile_grid_safe_crop": "1:1 centered (1080x1080, y=420..1500)",
+        "organic_api_param": "post_info.video_cover_timestamp_ms (no external JPG upload in organic Content Posting API)"
+      }
+    },
+    "facebook_reels": {
+      "architecture": "Meta AI Unified Video Ranking + Facebook Content Monetization Program + Strict Originality Guidelines",
+      "primary_gates": {
+        "core_signals": ["completion_rate", "shares", "rewatches", "meaningful_comment_threads"]
+      },
+      "key_levers": [
+        "Nostalgic/community-debate 1-2 line caption (avoid keyword/hashtag stuffing)",
+        "Custom 1080x1920 cover uploaded via Meta Business Suite",
+        "Strict adherence to top 14% / bottom 35% / sides 6% UI margins"
+      ],
+      "penalties": [
+        "Direct reposts without transformative value",
+        "Engagement bait and spammy keyword-stuffed captions"
+      ],
+      "cover_spec": {
+        "canvas_px": [1080, 1920],
+        "upload_surface": "Meta Business Suite -> Cover -> Upload Image",
+        "ui_safe_margins_pct": {"top": 14, "bottom": 35, "sides": 6}
+      }
+    },
+    "x_twitter": {
+      "architecture": "xai-org/x-algorithm: SimClusters (~145k communities) + TwHIN Graph Embeddings + Phoenix Rust/Python Transformer Heavy Ranker",
+      "verified_weights": {
+        "reply_with_author_engagement": 75.0,
+        "standard_reply": 13.5,
+        "repost": 1.0,
+        "like": 0.5,
+        "external_link_reach_penalty_pct": [-50, -30]
+      },
+      "key_levers": [
+        "Native MP4 upload targeting >=50% and 100% video watch-through + dwell time",
+        "Zero external links in main post (use link-in-reply to promote YouTube Long-Form)",
+        "Organic author reply to early real comments (triggers ~75x / 150x-like multiplier; zero bots)"
+      ],
+      "penalties": [
+        "External URLs in primary post",
+        "Toxic rage bait causing Reports, Blocks, Mutes, or Show Less Often"
+      ]
+    }
+  },
+  "universal_cover_safe_box_9_16_px": {
+    "canvas": [1080, 1920],
+    "safe_rect_xyxy": [90, 420, 990, 1250],
+    "recommended_hook_band_y": [670, 830]
+  },
+  "creator_frameworks": {
+    "paddy_galloway_ccn": "Satisfy Core (lore/callbacks), Casual (quick re-onboarding), and New (zero-context instant visual hook) simultaneously; <=3 thumbnail elements; complementary title + visual curiosity gap.",
+    "jenny_hoyos_shorts": "Frame-1 visual shock -> <3s clear stakes/foreshadowing -> cut cleanly on climax resolution (avoid 20-25% final-second cliff) -> 5th-grade reading ease.",
+    "kallaway_triple_hook": "Strict alignment of Visual Hook (mute-understandable) + Audio Hook (context lean) + Text Hook (disruptive pattern interrupt).",
+    "brendan_kane_hook_point": "Hyper-specific or counter-intuitive 3-second hook; iterate structural viral templates.",
+    "derral_eves_youtube_formula": "Algorithm tracks viewer behavior (CTR x Retention); iterate systematically on retention drop-off timestamps.",
+    "mrbeast_production_memo": "Obsess over opening hook and minutes 1-3 in Long-Form; keep structure radically simple inside high-stakes action."
+  },
+  "strict_ban_red_lines": [
+    "NEVER use secondary sock-puppet accounts, Playwright comment bots, or anti-detect browsers (Multilogin/Dolphin Anty)",
+    "NEVER repost identical failed MP4s without transforming 0-3s hook and visual hash",
+    "NEVER upload cross-platform watermarked exports",
+    "NEVER mix raw Bounties CPM clips (voice_mode=none) onto an Owned YPP AdSense channel without human commentary transformation"
+  ]
+}

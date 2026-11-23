@@ -20,11 +20,13 @@
 
 ---
 
-## 3. Roles del Equipo de Agentes (4 Skills en `.agents/skills/`)
-1. **`marketing-strategist`** — Auditoría de bounties CPM (burn rate 20%–80%, cláusulas trampa, geo-locks), hooks de 0–3s, empaquetado de títulos/captions y estrategia puente a YouTube Long-Form.
-2. **`av-director`** — Dirección narrativa y visual: inicio directo en acción/reacción (nunca en pregunta o contexto muerto), encuadre split-screen webcam-sobre-gameplay, freeze-frame con callout, pacing sin dead air y política `voice_mode`.
-3. **`media-engineer`** — Ingeniería determinista: `yt-dlp` + `curl_cffi` + JS runtime, `parakeet-tdt-0.6b-v3` (`onnx-asr` `int8`), `cutawan` ONNX (UltraFace + LR-ASD), `FFmpeg` (`h264_qsv`/`h264_nvenc`/`libx264`), `libass` karaoke, `setpts` y abstracción `compute_profile`.
-4. **`retention-critic`** — QA multimodal y gate de salida: inspección de 4–6 frames clave vía `ffmpeg-mcp-lite`, safe-zones móviles (Samsung Galaxy A36), auditoría de audio (`-14 LUFS`, pico `<= -1.0 dBTP`), chequeo anti-DMCA y rúbrica de 5 ejes (`max_retries=1`).
+## 3. Roles del Equipo de Agentes (6 Skills en `.agents/skills/`)
+1. **`marketing-strategist`** — Ingeniería de hooks 0–3s, títulos/SEO Tier-1, empaquetado nativo para **5 redes** (YouTube Shorts, TikTok, Instagram Reels, Facebook Reels, X) y estrategia puente a YouTube Long-Form (8+ min).
+2. **`av-director`** — Dirección narrativa y visual Senior: inicio directo en acción/reacción, split-screen `webcam_position: top` (tarjeta `<=1.8x` anclada bajo `y=180`), jump-cuts selectivos respetando *Synchresis* (`0.25s`), *punch-in zoom* RMS `1.12x`, SFX CC0 motivados y consumo de `context/viral_style_dna.json`.
+3. **`media-engineer`** — Ingeniería determinista Python 3.12: `yt-dlp` + `curl_cffi` + `deno` EJS + `streamlink`, `parakeet-tdt-0.6b-v3` (`onnx-asr` `int8`), `UltraFace` + `LR-ASD` ONNX, `YAMNet` ONNX, `FFmpeg` (`h264_qsv`/`h264_nvenc`/`libx264`), `libass` (`Montserrat Black` vía `fontsdir=fonts`), *profanity bleeper* 0–7.5s, `SQLite WAL/FTS5`, `resource_guard` y *Live-Stream Sniper*.
+4. **`retention-critic`** — QA multimodal y gate de salida: inspección de 4–6 frames `*_safezones.png` vía `ffmpeg-mcp-lite`, safe-zones de las **5 redes**, auditoría de audio (`-14 LUFS`, pico `<= -1.0 dBTP`), chequeo anti-DMCA, cero groserías sin bleep en 0–7s y rúbrica de 5 ejes (`max_retries=1`).
+5. **`viral-intelligence-analyst`** — Ingeniería inversa de outliers virales en IG Reels, FB Reels, YT Shorts, TikTok y X (`/outliers` + `/steal` FFmpeg: cortes/min, duración óptima, `share-to-view`, `vph` -> `context/viral_style_dna.json`).
+6. **`bounty-and-distribution-ops`** — Auditoría financiera/compliance de bounties CPM (`Whop Content Rewards`, `Clipping.net`, `Vyro`, `ClipBoom` -> burn rate 20%–80%, geo-lock, tabla `campaigns` en `runs/studio.db`), entregas HITL anti-ban y analítica post-publicación.
 
 ---
 
@@ -44,9 +46,9 @@ Toda etapa de cómputo lee `COMPUTE_PROFILE` (`gcp_spot_l4 | colab_t4 | local_hp
 
 ---
 
-## 6. Presupuesto de Complejidad y Restricciones de Alcance (v1)
-- **Tope de MCPs activos en Clipping Studio:** Máximo **2 MCPs** (`context7` + `ffmpeg-mcp-lite`). Prohibido activar `Playwright MCP`, `Qdrant MCP` o servidores con >15 tools antes de superar los primeros 10 clips publicados.
-- **Conocimiento en v1 (Prompt Caching):** Leer las biblias destiladas `docs/style_bible.md`, `docs/marketing_playbook.md` y `docs/engineering_patterns.md`. Qdrant queda en **solo lectura** hasta superar 100 clips con telemetría propia.
+## 6. Presupuesto de Complejidad y Restricciones de Alcance (v2.5)
+- **Tope de MCPs activos en Clipping Studio:** Máximo **4 MCPs livianos** (`context7` + `ffmpeg-mcp-lite`, más `mcp-server-sqlite` sobre `runs/studio.db` y `firecrawl-mcp` acotado a `scrape`/`extract`). Prohibido activar `Playwright MCP`, `Qdrant MCP` o servidores pesados (>15 tools) en la HP 250 G8.
+- **Conocimiento y Persistencia:** `runs/studio.db` (SQLite `WAL` + `FTS5`) es la fuente de verdad operativa; Prompt Caching implícito (`gemini-3.8-flash` @ `global`, >6,144 tokens) inyecta `docs/style_bible.md`, `docs/marketing_playbook.md`, `context/gta6_living_brief.md`, `context/gta6_lore_index.json`, `context/golden_references.json` y `context/viral_style_dna.json`. Qdrant queda en **solo lectura** hasta superar 100 clips con telemetría propia.
 - **Referencias aisladas:** `_references/` es solo lectura (en `.gitignore` y `.antigravityignore`). Prohibido importar módulos directamente desde `_references/`.
-- **Congelado hasta post-10 clips:** VFX GPU (`SAM 3.1`, `MatAnyone 2`, `DA3`, `HunyuanVideo-Foley`), `hyperframes`, scraping autónomo con Playwright y Multi-POV complejo.
+- **Congelado hasta post-25 clips:** VFX GPU pesados (`SAM 3.1`, `MatAnyone 2`, `DA3`, `HunyuanVideo-Foley`), self-hosting de `Postiz` en Docker local y Multi-POV complejo.
 - **Convenciones Antigravity IDE (Nov 2026):** Prohibido crear `.agents/workflows/` (deprecado). Toda automatización vive en `AGENTS.md`, `.agents/rules/*.md` (plano), `.agents/skills/*/SKILL.md` y CLI Python en `src/`.

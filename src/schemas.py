@@ -1,4 +1,4 @@
-"""Frozen Pydantic v2 data contracts for Clipping Studio (Hito 1.1)."""
+"""Frozen Pydantic v2 data contracts for Clipping Studio (Hito 2.0)."""
 
 from __future__ import annotations
 
@@ -14,9 +14,11 @@ SceneType = Literal[
     "just_chatting",
 ]
 
+LayoutMode = Literal["split_webcam_top", "full_gameplay_9_16"]
+
 
 class WordTimestamp(BaseModel):
-    """Single transcribed word with exact start/end timestamps."""
+    """Single transcribed word with exact start/end timestamps and optional LR-ASD score."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -25,6 +27,7 @@ class WordTimestamp(BaseModel):
     end: float = Field(ge=0.0)
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     is_npc_or_other: bool = False
+    streamer_asd_score: float | None = None
 
 
 class NonVerbalEvent(BaseModel):
@@ -40,7 +43,7 @@ class NonVerbalEvent(BaseModel):
 
 
 class CandidateSlice(BaseModel):
-    """75-second surgical VOD slice extracted for transcription and curation."""
+    """Surgical VOD/clip slice extracted for transcription and curation (1080p native floor)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -50,14 +53,24 @@ class CandidateSlice(BaseModel):
     start_sec: float = Field(ge=0.0)
     end_sec: float = Field(ge=0.0)
     duration_sec: float = Field(gt=0.0)
-    signal_source: Literal["youtube_heatmap", "twitch_chat_zscore", "audio_rms", "manual_window"]
+    signal_source: Literal[
+        "youtube_heatmap",
+        "twitch_chat_zscore",
+        "kick_clips_rank",
+        "kick_hls_window",
+        "audio_rms",
+        "manual_window",
+    ]
     score: float = Field(ge=0.0)
     slice_video_path: str
     slice_audio_path: str | None = None
+    source_width: int = Field(default=0, ge=0)
+    source_height: int = Field(default=0, ge=0)
+    source_fps: float = Field(default=0.0, ge=0.0)
 
 
 class AnnotatedTranscript(BaseModel):
-    """Word-level transcript enriched with non-verbal markers, DMCA score, and contact-sheet."""
+    """Word-level transcript enriched with non-verbal markers, YAMNet ONNX DMCA score, and contact-sheet."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -68,6 +81,8 @@ class AnnotatedTranscript(BaseModel):
     non_verbal_events: list[NonVerbalEvent] = Field(default_factory=list)
     music_prob_peak: float = Field(default=0.0, ge=0.0, le=1.0)
     dmca_flag: bool = False
+    yamnet_top_events: list[dict[str, float | str]] = Field(default_factory=list)
+    dmca_detector: Literal["yamnet_onnx", "fft_fallback"] = "yamnet_onnx"
     contact_sheet_path: str | None = None
     duration_sec: float = Field(default=0.0, ge=0.0)
 
@@ -96,7 +111,7 @@ class FreezeFrameSpec(BaseModel):
 
 
 class SliceAuditResult(BaseModel):
-    """Pass-1 multimodal scene, webcam bbox, and anti-DMCA audit result."""
+    """Pass-1 multimodal scene, webcam bbox, lore match, and anti-DMCA audit result."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -112,6 +127,7 @@ class SliceAuditResult(BaseModel):
     suggested_end_sec: float = Field(default=30.0, gt=0.0)
     hook_headline: str = ""
     freeze_frame: FreezeFrameSpec | None = None
+    matched_lore_entity: str | None = None
     self_contained_score: int = Field(default=0, ge=0, le=100)
     rationale: str = ""
 
@@ -133,8 +149,13 @@ class EditPlan(BaseModel):
     voice_mode: Literal["none", "human_batch", "tts"] = "none"
     clip_lane: Literal["discovery", "trend_multi_pov"] = "discovery"
     matched_trend_id: str | None = None
+    matched_lore_entity: str | None = None
+    layout_mode: LayoutMode = "split_webcam_top"
     webcam_box_2d: tuple[int, int, int, int] | None = None
     webcam_box_px: tuple[int, int, int, int] | None = None
+    gameplay_crop_px: tuple[int, int, int, int] | None = None
+    webcam_upscale_factor: float = Field(default=1.0, ge=0.0)
+    no_webcam_gameplay_overlap: bool = True
     freeze_frame: FreezeFrameSpec | None = None
     dmca_clear: bool = True
     dmca_risk_reason: str = ""
@@ -149,6 +170,55 @@ class EditPlan(BaseModel):
         if not words or len(words) > 12 or len(clean) > 90:
             raise ValueError("hook_headline must be 1..12 words and <= 90 chars")
         return clean
+
+
+class ClipPackaging(BaseModel):
+    """Algorithmic 5-network metadata bundle generated for approved master clips."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    clip_id: str
+    shorts_title: str
+    shorts_hashtags: list[str]
+    tiktok_caption: str
+    suggested_on_screen_hook: str
+    reels_caption: str
+    facebook_reels_caption: str = ""
+    x_post_text: str = ""
+    matched_lore_entity: str | None = None
+    bounty_safe: bool = True
+
+    @field_validator("x_post_text")
+    @classmethod
+    def _validate_x_post(cls, v: str) -> str:
+        clean = " ".join(v.strip().split())
+        if len(clean) > 260:
+            raise ValueError(f"x_post_text must be <= 260 chars (got {len(clean)})")
+        return clean
+
+    @field_validator("shorts_title")
+    @classmethod
+    def _validate_shorts_title(cls, v: str) -> str:
+        clean = " ".join(v.strip().split())
+        if not clean or len(clean) > 60:
+            raise ValueError(f"shorts_title must be 1..60 chars (got {len(clean)})")
+        return clean
+
+    @field_validator("suggested_on_screen_hook")
+    @classmethod
+    def _validate_on_screen_hook(cls, v: str) -> str:
+        clean = " ".join(v.strip().split())
+        if not clean or len(clean.split()) > 6:
+            raise ValueError(f"suggested_on_screen_hook must be 1..6 words (got {clean!r})")
+        return clean
+
+    @field_validator("shorts_hashtags")
+    @classmethod
+    def _validate_hashtags(cls, v: list[str]) -> list[str]:
+        tags = [t.strip() if t.strip().startswith("#") else f"#{t.strip()}" for t in v if t.strip()]
+        if len(tags) < 3 or len(tags) > 5:
+            raise ValueError(f"shorts_hashtags must have 3..5 hashtags (got {len(tags)})")
+        return tags
 
 
 class BlindCriticResult(BaseModel):
@@ -187,5 +257,6 @@ class RunState(BaseModel):
     edit_plans: list[EditPlan] = Field(default_factory=list)
     rendered_clips: list[str] = Field(default_factory=list)
     critic_results: list[BlindCriticResult] = Field(default_factory=list)
+    packaging: list[ClipPackaging] = Field(default_factory=list)
     disk_usage_mb: float = Field(default=0.0, ge=0.0)
     updated_at: str = ""

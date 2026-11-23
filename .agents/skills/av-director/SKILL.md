@@ -22,9 +22,11 @@ description: >-
    - **Cero cutscenes crudas:** Descartar tramos de cinemática o gameplay sin comentario/reacción activa del streamer (riesgo de rechazo por "contenido no original").
    - **Filtro de subtítulos inteligentes (patrón ClipKaro):** Subtitular solo la voz del streamer y amigos en Discord; **nunca** duplicar subtítulos de NPCs/diálogos internos del juego.
    - **Limpieza de aire muerto selectiva:** Cortar silencios muertos >0.45s y muletillas ("um", "uh"), pero **conservar** micro-pausas de tensión (0.2s–0.35s) previas a un impacto o remate (*Synchresis* de Chion) y conservar sonidos clave del juego (explosiones, disparos).
-3. **Composición 9:16 Calibrada:**
-   - **Layout Streamer GTA VI:** Gameplay arriba (zona de acción principal), webcam del streamer debajo/arriba según posición estable detectada vía Gemini Spatial Bounding Box (`[ymin, xmin, ymax, xmax]` 0–1000), y **subtítulos karaoke en la costura central** fuera del rostro y fuera de las safe-zones de botones de TikTok/Shorts/Reels.
-   - **Freeze-frame con callout:** Máximo 1 por clip en el pico cómico/dramático (0.6s–1.0s), nunca abusar.
+3. **Composición 9:16 Calibrada (Estudio Senior):**
+   - **Layout Streamer GTA VI (`webcam_position: "top"`):** Banda superior (`692 px`) con tarjeta webcam redondeada `<= 1.8x` anclada bajo `y = 180` sobre backdrop difuminado (o split limpio si `webcam_w >= 540 px`); banda inferior (`1228 px`) con gameplay nativo `1080p60` y exclusión geométrica `+48 px` (`no_webcam_gameplay_overlap == True`).
+   - **Subtítulos `Montserrat Black` discretos** (cero `\kf`, `<= 3` palabras / `<= 16` chars, centrados en `(540, 1120)` dentro de la Caja Roja universal, excluyendo NPCs vía `LR-ASD` y tartamudeos de 1 letra).
+   - **Edición dinámica motivada:** jump-cuts selectivos solo sobre silencio acústico real `<-30 dBFS` (`>0.95s`, preservando `0.25s` de *Synchresis*), máx. 2 *punch-in zooms* `1.10x–1.12x` en picos vocales/acción, 1–2 micro-SFX CC0 (`pop`/`whoosh` a `-16/-18 dB`) y máximo 1 freeze-frame callout (`0.6s–1.0s`).
+   - **Style DNA:** Consultar `context/viral_style_dna.json` cuando exista para alinear duración y ritmo a los outliers ganadores.
 4. **Política de Voz y Anti-DMCA:**
    - Respetar `voice_mode: "none"` en bounties CPM; solo activar `human_batch` (Shure SM58) para Cold Opens de YPP/Long-Form.
    - Rechazar cualquier candidato con radio licenciada o música ambiental de GTA VI audible sobre el diálogo.

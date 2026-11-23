@@ -30,26 +30,36 @@ clip_rules:
 layout_9_16:
   width: 1080
   height: 1920
-  fps: 30
+  preserve_source_fps: true
+  fps: 60
   webcam_band_ratio: 0.36 # 36% webcam / 64% gameplay
   webcam_position: "top"  # top | bottom
+  max_webcam_upscale: 1.8 # Regla fisica anti-upscale destructivo cuando webcam < 540px
+  webcam_exclusion_pad_px: 48
   rms_punch_in_max_zoom: 1.15
   safe_zones:
-    top_pct: 14
-    right_pct: 15
-    bottom_pct: 22
-    left_pct: 6
+    top_pct: 15
+    right_pct: 18
+    bottom_pct: 35
+    left_pct: 4
 
 captions:
   engine: "libass"
-  font_name: "Segoe UI Black" # Verificada en C:\Windows\Fonts
-  font_size: 74
+  font_name: "Montserrat Black"
+  font_file: "assets/fonts/Montserrat-Black.ttf"
+  font_size: 68
+  uppercase: true
   max_words_per_chunk: 3
-  primary_color: "&H00FFFFFF"
-  highlight_color: "&H0000E5FF" # Acento 2% (90/8/2)
+  max_chars_per_chunk: 16
+  primary_color: "&H00FFFFFF" # Blanco puro base
+  highlight_color: "&H0000FFFF" # Amarillo neon (BGR) palabra activa
+  impact_color: "&H0055FF00" # Verde neon (BGR) impacto / grito
   outline_color: "&H00000000"
-  outline_width: 4
-  skip_npc_dialogue: true # Patron ClipKaro: no duplicar subtitulos nativos de GTA VI
+  outline_width: 6
+  shadow: 3
+  pos_x: 540
+  pos_y: 1120
+  skip_npc_dialogue: true # LR-ASD Streamer-Only: omitir NPCs y dialogos del juego
 
 audio:
   target_lufs: -14.0

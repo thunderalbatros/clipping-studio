@@ -17,6 +17,8 @@ from google.genai import types
 from openai import OpenAI
 from pydantic import BaseModel
 
+from src.db import get_daily_llm_spend_usd, insert_telemetry
+
 T = TypeVar("T", bound=BaseModel)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -24,6 +26,20 @@ _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 _TRANSIENT_MARKERS = ("429", "503", "rate limit", "resource_exhausted", "unavailable", "timeout")
 _DOTENV_LOADED = False
 _STATIC_BIBLE_PREFIX: str | None = None
+_VERTEX_CLIENTS: dict[tuple[str, str], genai.Client] = {}
+
+
+def _get_vertex_client(project: str, location: str) -> genai.Client:
+    key = (project, location)
+    if key not in _VERTEX_CLIENTS:
+        _VERTEX_CLIENTS[key] = genai.Client(vertexai=True, project=project, location=location)
+    return _VERTEX_CLIENTS[key]
+
+
+def _estimate_vertex_cost_usd(prompt_tokens: int, cached_tokens: int, output_tokens: int) -> float:
+    """Estimate USD cost using Gemini 3.8 Flash rates ($0.75/1M uncached in, $0.075/1M cached in, $3.75/1M out)."""
+    uncached = max(0, prompt_tokens - cached_tokens)
+    return round((uncached * 0.75 + cached_tokens * 0.075 + output_tokens * 3.75) / 1_000_000.0, 6)
 
 
 def _ensure_dotenv() -> None:
@@ -35,26 +51,49 @@ def _ensure_dotenv() -> None:
         _DOTENV_LOADED = True
 
 
+def reset_cached_prefix() -> None:
+    """Reset in-memory cached static prefix after context files are refreshed."""
+    global _STATIC_BIBLE_PREFIX
+    _STATIC_BIBLE_PREFIX = None
+
+
 def build_cached_system_instruction(task_instruction: str) -> str:
-    """Prepend identical canonical docs (>4096 tokens) as static prefix for Gemini 3.8 Implicit Caching."""
+    """Prepend identical canonical docs + GTA VI Lore + Golden References (>6144 tokens) for Implicit Caching."""
     global _STATIC_BIBLE_PREFIX
     if _STATIC_BIBLE_PREFIX is None:
         style_path = PROJECT_ROOT / "docs" / "style_bible.md"
         brief_path = PROJECT_ROOT / "context" / "gta6_living_brief.md"
         play_path = PROJECT_ROOT / "docs" / "marketing_playbook.md"
+        lore_path = PROJECT_ROOT / "context" / "gta6_lore_index.json"
+        golden_path = PROJECT_ROOT / "context" / "golden_references.json"
+        dna_path = PROJECT_ROOT / "context" / "viral_style_dna.json"
+        algo_path = PROJECT_ROOT / "context" / "platform_algorithms_index.json"
         style_txt = style_path.read_text(encoding="utf-8").strip() if style_path.exists() else ""
         brief_txt = brief_path.read_text(encoding="utf-8").strip() if brief_path.exists() else ""
         play_txt = play_path.read_text(encoding="utf-8").strip() if play_path.exists() else ""
+        lore_txt = lore_path.read_text(encoding="utf-8").strip() if lore_path.exists() else "{}"
+        golden_txt = golden_path.read_text(encoding="utf-8").strip() if golden_path.exists() else "{}"
+        dna_txt = dna_path.read_text(encoding="utf-8").strip() if dna_path.exists() else "{}"
+        algo_txt = algo_path.read_text(encoding="utf-8").strip() if algo_path.exists() else "{}"
         _STATIC_BIBLE_PREFIX = (
             "=== CANONICAL STUDIO STYLE BIBLE ===\n"
             f"{style_txt}\n\n"
             "=== CANONICAL MARKETING PLAYBOOK ===\n"
             f"{play_txt}\n\n"
+            "=== PLATFORM ALGORITHMS & VIRALITY INDEX (5 NETWORKS) ===\n"
+            f"{algo_txt}\n\n"
             "=== DAILY GTA VI LIVING BRIEF ===\n"
             f"{brief_txt}\n\n"
+            "=== GTA VI EXPERT LORE & EASTER EGGS INDEX ===\n"
+            f"{lore_txt}\n\n"
+            "=== TODAY'S VIRAL GOLDEN REFERENCES ===\n"
+            f"{golden_txt}\n\n"
+            "=== EMPIRICAL VIRAL STYLE DNA (/steal) ===\n"
+            f"{dna_txt}\n\n"
             "=== INVARIANT ENGINE RULES ===\n"
             "- Output strictly valid JSON matching the requested Pydantic v2 schema.\n"
             "- Reject non-gameplay footage (trailers, YouTube reactions, menus, BRB) when auditing gameplay VODs.\n"
+            "- Reject meta-stream talk (gifted subs, donation shoutouts, raid welcomes) from viral short clips.\n"
             "- Enforce anti-DMCA hygiene: reject audible licensed radio/club/trailer music, especially for clips >60s.\n"
         )
     return f"{_STATIC_BIBLE_PREFIX}\n=== TASK INSTRUCTION ===\n{task_instruction.strip()}"
@@ -101,20 +140,25 @@ def _call_vertex_ai(
     response_model: type[T],
     system_instruction: str | None,
     max_retries: int,
-    images: list[bytes | Path | str] | None = None,
+    images: list[bytes | Path | str | tuple[bytes | Path | str, str]] | None = None,
     media_resolution: str = "MEDIA_RESOLUTION_HIGH",
 ) -> tuple[T, str]:
     project = os.getenv("GCP_PROJECT_ID", "").strip()
     if not project:
         raise RuntimeError("GCP_PROJECT_ID missing for vertex_ai provider")
 
-    res_enum = getattr(types.MediaResolution, media_resolution, types.MediaResolution.MEDIA_RESOLUTION_HIGH)
+    default_res = getattr(types.MediaResolution, media_resolution, types.MediaResolution.MEDIA_RESOLUTION_HIGH)
     contents: Any = prompt
     if images:
         parts: list[Any] = []
-        for img in images:
-            raw, mime = _load_image_bytes(img)
-            parts.append(types.Part.from_bytes(data=raw, mime_type=mime, media_resolution=res_enum))
+        for item in images:
+            if isinstance(item, tuple):
+                img_obj, item_res_name = item
+                item_res = getattr(types.MediaResolution, item_res_name, default_res)
+            else:
+                img_obj, item_res = item, default_res
+            raw, mime = _load_image_bytes(img_obj)
+            parts.append(types.Part.from_bytes(data=raw, mime_type=mime, media_resolution=item_res))
         parts.append(prompt)
         contents = parts
 
@@ -125,12 +169,17 @@ def _call_vertex_ai(
         response_json_schema=response_model.model_json_schema(),
     )
 
+    daily_cap = float(os.getenv("LLM_DAILY_BUDGET_USD", "2.50") or 2.50)
+    spent_today = get_daily_llm_spend_usd()
+    if spent_today >= daily_cap:
+        raise RuntimeError(f"Daily Vertex AI USD budget cap reached (${spent_today:.4f} >= ${daily_cap:.2f}); falling back.")
+
     last_exc: Exception | None = None
     for model, location in _vertex_candidates():
         for attempt in range(max_retries + 1):
             t0 = time.perf_counter()
             try:
-                client = genai.Client(vertexai=True, project=project, location=location)
+                client = _get_vertex_client(project, location)
                 resp = client.models.generate_content(
                     model=model,
                     contents=contents,
@@ -139,17 +188,35 @@ def _call_vertex_ai(
                 latency_ms = int((time.perf_counter() - t0) * 1000)
                 parsed = response_model.model_validate_json(_strip_json_fences(resp.text or ""))
                 um = getattr(resp, "usage_metadata", None)
-                prompt_toks = getattr(um, "prompt_token_count", None)
-                cached_toks = getattr(um, "cached_content_token_count", None)
+                prompt_toks = int(getattr(um, "prompt_token_count", 0) or 0)
+                cached_toks = int(getattr(um, "cached_content_token_count", 0) or 0)
+                output_toks = int(getattr(um, "candidates_token_count", 0) or 0)
+                est_usd = _estimate_vertex_cost_usd(prompt_toks, cached_toks, output_toks)
+                insert_telemetry(
+                    "llm_router",
+                    "llm_usage",
+                    {
+                        "provider": "vertex_ai",
+                        "model": model,
+                        "location": location,
+                        "prompt_tokens": prompt_toks,
+                        "cached_tokens": cached_toks,
+                        "output_tokens": output_toks,
+                        "est_cost_usd": est_usd,
+                        "latency_ms": latency_ms,
+                    },
+                )
                 print(
                     f"[LLM_ROUTER] provider=vertex_ai model={model} loc={location} "
-                    f"latency_ms={latency_ms} prompt_tokens={prompt_toks} cached_tokens={cached_toks} status=OK"
+                    f"latency_ms={latency_ms} prompt_tokens={prompt_toks} cached_tokens={cached_toks or None} "
+                    f"est_usd=${est_usd:.5f} status=OK"
                 )
                 return parsed, f"vertex_ai:{model}"
-            except Exception as exc:  # noqa: BLE001 - retry transient/SDK/ADC fallback across model candidates
+            except Exception as exc:
                 last_exc = exc
                 if "refresh" in str(exc).lower() and os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
                     os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+                    _VERTEX_CLIENTS.pop((project, location), None)
                     continue
                 if _is_transient_error(exc) and attempt < max_retries:
                     time.sleep(1.5 * (2**attempt))
@@ -168,7 +235,7 @@ def _call_openai_compat(
     response_model: type[T],
     system_instruction: str | None,
     max_retries: int,
-    images: list[bytes | Path | str] | None = None,
+    images: list[bytes | Path | str | tuple[bytes | Path | str, str]] | None = None,
 ) -> tuple[T, str]:
     if not api_key:
         raise RuntimeError(f"API key missing for {provider_name}")
@@ -182,8 +249,9 @@ def _call_openai_compat(
     user_content: Any = prompt
     if images and provider_name == "openrouter":
         blocks: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-        for img in images:
-            raw, mime = _load_image_bytes(img)
+        for item in images:
+            img_obj = item[0] if isinstance(item, tuple) else item
+            raw, mime = _load_image_bytes(img_obj)
             b64 = base64.b64encode(raw).decode("ascii")
             blocks.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
         user_content = blocks
@@ -225,7 +293,7 @@ def generate_structured(
     force_provider: str | None = None,
     providers_order: list[str] | None = None,
     max_retries: int = 2,
-    images: list[bytes | Path | str] | None = None,
+    images: list[bytes | Path | str | tuple[bytes | Path | str, str]] | None = None,
     media_resolution: str = "MEDIA_RESOLUTION_HIGH",
 ) -> tuple[T, str]:
     """Generate a Pydantic-validated response using Vertex (3.8-flash -> 2.5-flash) -> Groq -> OpenRouter."""
@@ -274,7 +342,7 @@ def generate_structured(
                     images=images,
                 )
             raise ValueError(f"Unknown provider: {provider}")
-        except Exception as exc:  # noqa: BLE001 - intentional provider ladder boundary
+        except Exception as exc:
             err_name = type(exc).__name__
             err_msg = str(exc).splitlines()[0][:140]
             print(f"[LLM_ROUTER] provider={provider} status=FAIL err={err_name}: {err_msg}")

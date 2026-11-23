@@ -1,0 +1,44 @@
+{
+  "generated_at": "2026-11-23T11:12:02.007761+00:00",
+  "sample_count": 1,
+  "empirical_medians": {
+    "duration_sec": 20.6,
+    "cuts_per_min": 2.9,
+    "avg_shot_len_sec": 10.28,
+    "opening_3s_lufs": -11.2,
+    "first_cut_sec": 13.95
+  },
+  "recommended_targets": {
+    "target_duration_sec": [
+      16.5,
+      25.8
+    ],
+    "target_cuts_per_min": [
+      8.0,
+      16.0
+    ],
+    "target_avg_shot_len_sec": [
+      7.71,
+      6.0
+    ],
+    "opening_3s_lufs_floor": -12.7,
+    "first_visual_pattern_interrupt_sec": 4.0
+  },
+  "samples": [
+    {
+      "label": "clip_02_senior_9_16.mp4",
+      "path": "runs\\twitch_jynxzi_v2_01\\clip_02_senior_9_16.mp4",
+      "aspect": "9:16",
+      "width": 1080,
+      "height": 1920,
+      "fps": 60.0,
+      "duration_sec": 20.55,
+      "scene_cuts_count": 1,
+      "cuts_per_min": 2.92,
+      "avg_shot_len_sec": 10.28,
+      "first_cut_sec": 13.95,
+      "opening_3s_lufs": -11.2,
+      "opening_3s_peak_dbfs": -1.9
+    }
+  ]
+}

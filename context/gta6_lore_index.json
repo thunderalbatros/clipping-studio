@@ -1,0 +1,177 @@
+{
+  "game": "Grand Theft Auto VI",
+  "release_date": "2026-11-19",
+  "platforms": ["PlayStation 5", "Xbox Series X|S"],
+  "setting": {
+    "state": "Leonida",
+    "regions": [
+      "Vice City",
+      "Leonida Keys",
+      "Grassrivers",
+      "Port Gellhorn",
+      "Mount Kalaga",
+      "Ocean Drive",
+      "Washington Island",
+      "South Vice-Dale County",
+      "Skeeter's / Gullet Marsh"
+    ]
+  },
+  "characters": {
+    "protagonists": [
+      {"name": "Jason Duval", "role": "Co-protagonist, ex-military / criminal partner to Lucia"},
+      {"name": "Lucia Caminos", "role": "Co-protagonist, recently released from Leonida Penitentiary"}
+    ],
+    "key_npcs": [
+      {"name": "Brian Heder", "role": "Veteran Keys smuggler and landlord"},
+      {"name": "Cal Hampton", "role": "Jason's paranoid conspiracy-theorist friend"},
+      {"name": "Boobie Ike", "role": "Vice City real-estate & nightclub mogul"},
+      {"name": "Dre'Quan Priest", "role": "Only Raw Records hustler & music promoter"},
+      {"name": "Real Dimez (Bae-Luxe & Roxy)", "role": "Viral Leonida rap duo"},
+      {"name": "Raul Bautista", "role": "Seasoned bank heist planner"}
+    ]
+  },
+  "chapters": [
+    {
+      "chapter": 1,
+      "title": "Just Like Paradise",
+      "iconic_missions": ["Prologue", "Swamped", "Discharge Time"]
+    },
+    {
+      "chapter": 2,
+      "title": "Paradise Lost",
+      "iconic_missions": ["Coffee Break", "Checking Out"]
+    },
+    {
+      "chapter": 3,
+      "title": "Tits, Ass, Drug Money",
+      "iconic_missions": ["Welcome to Vice City", "Boobie Time", "Sinfrontera National Bank", "The Cartel Heist"]
+    },
+    {
+      "chapter": 4,
+      "title": "Vice City, Baby",
+      "iconic_missions": ["Ocean Beach", "VCIA Takedown"]
+    },
+    {
+      "chapter": 5,
+      "title": "Top of the World, Ma",
+      "iconic_missions": ["The End of the Road"]
+    }
+  ],
+  "easter_eggs": [
+    {
+      "id": "ee_dexter",
+      "title": "Dexter Morgan Tribute",
+      "locations": ["Trinity Apartments (Washington Island)", "Kill Room (Surfside Drive)", "Lure Predator Boat", "Underwater trash bags"],
+      "keywords": ["dexter", "trinity apartments", "kill room", "lure predator", "trash bags", "blood slides"]
+    },
+    {
+      "id": "ee_radio_tower_egg",
+      "title": "Literal Easter Egg at South Vice-Dale Radio Tower",
+      "locations": ["South Vice-Dale County Radio Tower"],
+      "keywords": ["radio tower", "easter egg", "throw the egg", "south vice-dale", "secret cutscene"]
+    },
+    {
+      "id": "ee_area_51_ufo",
+      "title": "Underground Area 51 Base & UFO Abduction",
+      "locations": ["Underground Military Base"],
+      "keywords": ["area 51", "2341", "ufo", "abduction", "alien dreams", "keypad"]
+    },
+    {
+      "id": "ee_skunk_ape",
+      "title": "Skunk Ape Cryptid",
+      "locations": ["Skeeter's", "Gullet Marsh", "Grassrivers"],
+      "keywords": ["skunk ape", "gullet marsh", "skeeter", "swamp monster", "cryptid"]
+    },
+    {
+      "id": "ee_bigfoot",
+      "title": "Bigfoot Encounter",
+      "locations": ["Mount Kalaga"],
+      "keywords": ["bigfoot", "sasquatch", "mount kalaga"]
+    },
+    {
+      "id": "ee_arthur_morgan_hat",
+      "title": "Arthur Morgan's Hat (RDR2)",
+      "locations": ["Port Gellhorn"],
+      "keywords": ["arthur morgan", "red dead", "cowboy hat", "port gellhorn"]
+    },
+    {
+      "id": "ee_loosy_dog",
+      "title": "Loosy the Jet-Ski Golden Retriever",
+      "locations": ["Vice City Beach / Keys"],
+      "keywords": ["loosy", "golden retriever", "dog on jet ski", "dog jet ski"]
+    },
+    {
+      "id": "ee_orange_cat",
+      "title": "Aggressive Orange Cat in Stolen Cars",
+      "locations": ["Vice City / Random Stolen Vehicles"],
+      "keywords": ["orange cat", "cat in car", "cat attacked", "stolen car cat"]
+    },
+    {
+      "id": "ee_michaels_yacht",
+      "title": "Michael De Santa's Stolen Yacht (GPS to Los Santos)",
+      "locations": ["Leonida Marina / Open Water"],
+      "keywords": ["michael", "yacht", "los santos", "gps", "gta 5"]
+    },
+    {
+      "id": "ee_pink_meteorite",
+      "title": "Pink Meteorite",
+      "locations": ["Mount Kalaga"],
+      "keywords": ["meteorite", "pink meteor", "mount kalaga", "crater"]
+    },
+    {
+      "id": "ee_lethal_by_design",
+      "title": "Lethal by Design Book (GTA IV Reference)",
+      "locations": ["Safehouse / Bookstores"],
+      "keywords": ["lethal by design", "gta 4", "gta iv", "niko"]
+    }
+  ],
+  "viral_launch_bugs": [
+    {
+      "id": "bug_prison_floor_clip",
+      "title": "Lucia Prison Floor Escape Glitch",
+      "keywords": ["prison", "fell through", "under the floor", "escaped jail", "lucia"]
+    },
+    {
+      "id": "bug_highway_boats",
+      "title": "Boats & Yachts Spawning on Highways",
+      "keywords": ["boat on highway", "yacht on road", "ship on street", "boat driving"]
+    },
+    {
+      "id": "bug_ghost_motorcycles",
+      "title": "Driverless Ghost Motorcycles",
+      "keywords": ["no driver", "ghost bike", "motorcycle by itself"]
+    },
+    {
+      "id": "bug_instant_wardrobe",
+      "title": "Instant Wardrobe Swap Glitch",
+      "keywords": ["clothes changed", "wardrobe glitch", "outfit vanished"]
+    },
+    {
+      "id": "bug_npc_teleport_phone_void",
+      "title": "NPC Teleportation & Phone-Crash Under-Map Void",
+      "keywords": ["under the map", "teleported", "pulled out phone", "falling forever", "void"]
+    }
+  ],
+  "brief_triggers": {
+    "sustos_y_caos": {
+      "keywords_transcript": ["oh shit", "what the fuck", "no way", "holy shit", "watch out", "alligator", "gator", "cops", "wasted", "crash", "explode", "jumpscare", "cat"],
+      "visual_cues": ["high-speed crash", "police 5-star swarm", "alligator ambush", "helicopter explosion", "streamer jumping back"]
+    },
+    "secretos_y_easter_eggs": {
+      "keywords_transcript": ["dexter", "area 51", "2341", "ufo", "alien", "skunk ape", "bigfoot", "arthur", "red dead", "michael", "los santos", "meteorite", "secret", "easter egg"],
+      "visual_cues": ["keypad code entry", "underground bunker", "ufo beam", "hidden room", "cryptid silhouette", "unique collectible"]
+    },
+    "bugs_virales": {
+      "keywords_transcript": ["bug", "glitch", "broken", "fell through", "under the map", "floating", "stuck", "ragdoll", "physics", "rockstar"],
+      "visual_cues": ["vehicle launched into sky", "boat on road", "character clipping through floor", "ragdoll spinning", "ghost vehicle"]
+    },
+    "atracos_y_accion": {
+      "keywords_transcript": ["bank", "heist", "vault", "cartel", "getaway", "chopper", "helicopter", "shootout", "sniper", "rpg", "escape"],
+      "visual_cues": ["Sinfrontera National Bank vault", "armored truck shootout", "helicopter chase", "jet ski escape", "explosions"]
+    },
+    "cinematicas_reaccion": {
+      "keywords_transcript": ["graphics", "insane", "cinema", "no way they did that", "lucia", "jason", "detail", "water"],
+      "visual_cues": ["streamer jaw drop during dramatic reveal", "active reaction commentary over iconic scene"]
+    }
+  }
+}

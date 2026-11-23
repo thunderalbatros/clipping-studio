@@ -1,70 +1,89 @@
-"""Pillow freeze-frame callout generator inside 2026 3-network red safe-zone (Hito 1.4)."""
+"""Pillow freeze-frame callout generator aligned with adaptive <=1.8x layout and Montserrat Black (Hito 2.0)."""
 
 from __future__ import annotations
 
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from src.schemas import EditPlan
 
-_FONT_PATH = Path(r"C:\Windows\Fonts\seguibl.ttf")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_BUNDLED_FONT = PROJECT_ROOT / "assets" / "fonts" / "Montserrat-Black.ttf"
+_FALLBACK_FONT = Path(r"C:\Windows\Fonts\seguibl.ttf")
 
 
 def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    try:
-        return ImageFont.truetype(str(_FONT_PATH), size) if _FONT_PATH.exists() else ImageFont.load_default()
-    except OSError:
-        return ImageFont.load_default()
+    for p in (_BUNDLED_FONT, _FALLBACK_FONT):
+        if p.exists():
+            try:
+                return ImageFont.truetype(str(p), size)
+            except OSError:
+                continue
+    return ImageFont.load_default()
 
 
-def _compose_9_16_frame(src_img: Image.Image, webcam_box_px: tuple[int, int, int, int] | None) -> Image.Image:
-    """Compose the exact 1080x1920 split-screen (692px webcam + 1228px gameplay) used by renderer."""
+def _compose_adaptive_9_16(src_img: Image.Image, layout: dict[str, Any] | None, webcam_box_px: tuple[int, int, int, int] | None) -> Image.Image:
+    """Compose the exact 1080x1920 frame matching src/renderer.py adaptive layout."""
     sw, sh = src_img.size
-    if webcam_box_px:
-        wx, wy, ww, wh = webcam_box_px
-        wx = max(0, min(sw - 32, wx))
-        wy = max(0, min(sh - 32, wy))
-        ww = max(32, min(sw - wx, ww))
-        wh = max(32, min(sh - wy, wh))
-        cam_crop = src_img.crop((wx, wy, wx + ww, wy + wh))
+    if layout and layout.get("layout_mode") == "full_gameplay_9_16":
+        gx, gy, gw, gh = layout["gameplay_crop_px"]
+        return src_img.crop((gx, gy, gx + gw, gy + gh)).resize((1080, 1920), Image.Resampling.LANCZOS).convert("RGBA")
+
+    if layout and layout.get("gameplay_crop_px"):
+        gx, gy, gw, gh = layout["gameplay_crop_px"]
+        gp_crop = src_img.crop((gx, gy, gx + gw, gy + gh))
     else:
-        cw = max(64, int(sw * 0.42))
-        ch = max(64, int(cw * 692 / 1080))
-        cx = max(0, (sw - cw) // 2)
-        cy = max(0, int(sh * 0.05))
-        cam_crop = src_img.crop((cx, cy, min(sw, cx + cw), min(sh, cy + ch)))
+        gw = min(sw, round(sh * (1080.0 / 1228.0)))
+        gx = (sw - gw) // 2
+        gp_crop = src_img.crop((gx, 0, gx + gw, sh))
 
-    # Scale-to-fill 1080x692 preserving aspect ratio then center-crop
-    tw, th = 1080, 692
-    scale_cam = max(tw / cam_crop.width, th / cam_crop.height)
-    cam_resized = cam_crop.resize(
-        (max(tw, round(cam_crop.width * scale_cam)), max(th, round(cam_crop.height * scale_cam))),
-        Image.Resampling.LANCZOS,
-    )
-    cl = (cam_resized.width - tw) // 2
-    ct = (cam_resized.height - th) // 2
-    top_band = cam_resized.crop((cl, ct, cl + tw, ct + th))
+    bot_band = gp_crop.resize((1080, 1228), Image.Resampling.LANCZOS).convert("RGBA")
 
-    # Gameplay band: scale height to 1228 preserving full vertical FOV, center-crop width to 1080
-    gh = 1228
-    gw_scaled = max(1080, round(sw * (gh / sh)))
-    if gw_scaled % 2 == 1:
-        gw_scaled += 1
-    gp_resized = src_img.resize((gw_scaled, gh), Image.Resampling.LANCZOS)
-    gl = (gp_resized.width - 1080) // 2
-    bot_band = gp_resized.crop((gl, 0, gl + 1080, gh))
+    cam_box = (layout.get("webcam_crop_px") if layout else None) or webcam_box_px
+    if cam_box:
+        cx, cy, cw, ch = cam_box
+        cam_crop = src_img.crop((max(0, cx), max(0, cy), min(sw, cx + cw), min(sh, cy + ch)))
+    else:
+        cam_crop = gp_crop
+
+    if layout and layout.get("is_framed_card") and layout.get("webcam_card_size"):
+        card_w, card_h = layout["webcam_card_size"]
+        bg = gp_crop.resize((1080, 692), Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(radius=18)).convert("RGBA")
+        dark = Image.new("RGBA", (1080, 692), (0, 0, 0, 75))
+        top_band = Image.alpha_composite(bg, dark)
+        card = cam_crop.resize((card_w, card_h), Image.Resampling.LANCZOS).convert("RGBA")
+        mask = Image.new("L", (card_w, card_h), 0)
+        ImageDraw.Draw(mask).rounded_rectangle([0, 0, card_w - 1, card_h - 1], radius=26, fill=255)
+        px = (1080 - card_w) // 2
+        py = max(0, min(692 - card_h - 10, max(172, 692 - card_h - 16)))
+        top_band.paste(card, (px, py), mask)
+        ImageDraw.Draw(top_band).rounded_rectangle(
+            [px, py, px + card_w - 1, py + card_h - 1], radius=26, outline=(245, 248, 255, 165), width=4
+        )
+    else:
+        tw, th = 1080, 692
+        sc = max(tw / max(1, cam_crop.width), th / max(1, cam_crop.height))
+        resized = cam_crop.resize((max(tw, round(cam_crop.width * sc)), max(th, round(cam_crop.height * sc))), Image.Resampling.LANCZOS)
+        cl, ct = (resized.width - tw) // 2, (resized.height - th) // 2
+        top_band = resized.crop((cl, ct, cl + tw, ct + th)).convert("RGBA")
 
     canvas = Image.new("RGBA", (1080, 1920), (0, 0, 0, 255))
-    canvas.paste(top_band.convert("RGBA"), (0, 0))
-    canvas.paste(bot_band.convert("RGBA"), (0, 692))
+    canvas.paste(top_band, (0, 0))
+    canvas.paste(bot_band, (0, 692))
     return canvas
 
 
-def render_freeze_callout(source_video: Path, edit_plan: EditPlan, out_png: Path) -> Path | None:
-    """Render a 1080x1920 freeze-frame PNG with ~45% vignette, spotlight box, and <=4 word Segoe UI Black callout."""
+def render_freeze_callout(
+    source_video: Path,
+    edit_plan: EditPlan,
+    out_png: Path,
+    layout: dict[str, Any] | None = None,
+) -> Path | None:
+    """Render 1080x1920 freeze-frame PNG with ~45% vignette, spotlight box, and <=4 word Montserrat Black callout."""
     ff = edit_plan.freeze_frame
     if ff is None:
         return None
@@ -91,48 +110,44 @@ def render_freeze_callout(source_video: Path, edit_plan: EditPlan, out_png: Path
         )
         src_img = Image.open(raw_frame).convert("RGBA")
 
-    canvas = _compose_9_16_frame(src_img, edit_plan.webcam_box_px)
+    canvas = _compose_adaptive_9_16(src_img, layout, edit_plan.webcam_box_px)
 
-    # Map normalized 0..1000 box_2d into gameplay band inside safe horizontal bounds [70..860]
     ymin, xmin, ymax, xmax = ff.box_2d
     bx0 = max(68, min(720, round(xmin * 1.08)))
     bx1 = max(bx0 + 140, min(872, round(xmax * 1.08)))
     by0 = max(708, min(1160, 692 + round(ymin * 1.228)))
-    by1 = max(by0 + 120, min(1320, 692 + round(ymax * 1.228)))
+    by1 = max(by0 + 120, min(1240, 692 + round(ymax * 1.228)))
 
-    # ~45% vignette outside focal rectangle while keeping focal rectangle bright
-    vignette_mask = Image.new("L", (1080, 1920), 115)  # 115/255 ~= 45% darken
-    mdraw = ImageDraw.Draw(vignette_mask)
-    mdraw.rectangle([bx0, by0, bx1, by1], fill=0)
+    vignette_mask = Image.new("L", (1080, 1920), 115)
+    ImageDraw.Draw(vignette_mask).rectangle([bx0, by0, bx1, by1], fill=0)
     dark_layer = Image.composite(
         Image.new("RGBA", (1080, 1920), (0, 0, 0, 130)),
         Image.new("RGBA", (1080, 1920), (0, 0, 0, 0)),
         vignette_mask,
     )
     composed = Image.alpha_composite(canvas, dark_layer)
-
     draw = ImageDraw.Draw(composed)
     draw.rectangle([bx0, by0, bx1, by1], outline=(0, 229, 255, 245), width=5)
 
-    # Render <=4-word callout inside Red Safe Box [48..888, 288..1248] right above the seam/callout box
     label = ff.callout_text.upper()
-    font = _load_font(58)
-    bbox = draw.textbbox((0, 0), label, font=font, stroke_width=4)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-    if tw > 790:
-        font = _load_font(46)
-        bbox = draw.textbbox((0, 0), label, font=font, stroke_width=4)
-        tw = bbox[2] - bbox[0]
-        th = bbox[3] - bbox[1]
+    font = _load_font(54)
+    bbox = draw.textbbox((0, 0), label, font=font, stroke_width=5)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    if tw > 760:
+        font = _load_font(42)
+        bbox = draw.textbbox((0, 0), label, font=font, stroke_width=5)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
 
-    safe_center_x = (48 + 888) // 2  # 468, keeps text well away from right_pct 18%
-    tx = max(60, min(870 - tw, safe_center_x - tw // 2))
-    ty = max(590, min(790 - th, 692 - th // 2))
-
-    # Clean kinetic accent pill behind label inside red safe box
-    draw.rounded_rectangle([tx - 18, ty - 10, tx + tw + 18, ty + th + 14], radius=12, fill=(10, 12, 16, 205), outline=(0, 229, 255, 220), width=3)
-    draw.text((tx, ty), label, font=font, fill=(255, 230, 0, 255), stroke_width=4, stroke_fill=(0, 0, 0, 255))
+    tx = max(64, min(872 - tw, 540 - tw // 2))
+    ty = max(600, min(780 - th, 692 - th // 2))
+    draw.rounded_rectangle(
+        [tx - 18, ty - 10, tx + tw + 18, ty + th + 14],
+        radius=12,
+        fill=(10, 12, 16, 215),
+        outline=(255, 255, 0, 235),
+        width=3,
+    )
+    draw.text((tx, ty), label, font=font, fill=(255, 255, 0, 255), stroke_width=5, stroke_fill=(0, 0, 0, 255))
 
     out_png.parent.mkdir(parents=True, exist_ok=True)
     composed.convert("RGB").save(out_png, format="PNG")

@@ -23,8 +23,12 @@ description: >-
 3. **Ingeniería del Gancho (0–3s):**
    - Aplicar el ciclo *Trigger -> Curiosity Gap -> Variable Reward*: abrir en el instante de tensión máxima, nunca en contexto muerto ni saludo.
    - Escribir 3 variantes de texto en pantalla / título (<= 6 palabras, lenguaje nativo inglés Tier-1 para GTA VI) sin clichés de "AI slop".
-4. **Empaquetado Multi-Red (1 Master -> 3 Plataformas):**
-   - Generar título + descripción + 3–5 tags limpios para Shorts, caption conversacional para TikTok y copy corto con CTA de guardado/compartido para Reels.
+4. **Empaquetado Multi-Red (1 Master -> 5 Plataformas):**
+   - **YouTube Shorts:** título `<= 60` chars, 3–5 hashtags limpios (`#GTA6 #Shorts`), enlace a compilado Long-Form 16:9.
+   - **TikTok:** caption conversacional de 1 línea que dispara debate benigno + keywords SEO.
+   - **Instagram Reels:** copy corto con CTA de envío por DM (`share-to-view` es la señal #1).
+   - **Facebook Reels:** copy explicativo en 1 línea (contexto rápido para audiencia amplia) + verificación anti-DMCA estricta.
+   - **X (Twitter):** post ultra-conciso (`<= 140` chars), máx. 0–2 hashtags, optimizado para inmediatez/live-sniping y autoplay silencioso.
    - Etiquetar si el clip alimenta un futuro compilado Long-Form (8+ min) temático.
 
 ## Validación de Salida

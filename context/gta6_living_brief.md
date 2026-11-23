@@ -21,3 +21,11 @@
 - **DMCA / Radio:** Descartar inmediatamente clips con musica comercial licenciada audible de radios, clubes, menus o DJs (incluso con *Mute Licensed Music* activado).
 - **Policy Safety:** Descartar tramos con desnudez accidental o contenido restringible por edad.
 - **Spoilers de historia:** Evitar giros del final de campana sin contexto autocontenido; priorizar reacciones viscerales, caos de mundo abierto y detalles tecnicos (pasan el Test del Desconocido en <3s).
+
+## Bloque D — Radar Automático 48h (Golden References)
+- Actualizado: 2026-11-23 11:12 UTC
+- [youtube_shorts] (1246788.7 vph, 37s) Mr Kunnu: GTA 6 m aa rha hu 😀 #gta6 #shorts #ps5 -> Direct action-reaction hook
+- [youtube_shorts] (145727.5 vph, 28s) JB4Clips: Joe Bart Talks About NickEh30 Getting Out of Character in GTA 6! 😭💀 -> Direct action-reaction hook
+- [youtube_shorts] (117923.1 vph, 57s) FactTechz: Indians Again At TOP!! ₹18,000 Crore GTA 6 Game Has HUGE Secret #shorts -> Curiosity gap reveal ('Rockstar hid THIS...')
+- [youtube_shorts] (114559.1 vph, 55s) RedDeadRagdolls: Throwing a Basketball at Random Strangers... #shorts #grandtheftauto #gaming #gta6 -> Direct action-reaction hook
+- [youtube_shorts] (105661.9 vph, 52s) Switch the Edit: "The Peak Time Of Our Lives..." ❤️‍🩹🥹 | Song - LOVE ME NOT | All Legends Edit | GTA 6 Edit -> Direct action-reaction hook

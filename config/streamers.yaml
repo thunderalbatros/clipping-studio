@@ -1,16 +1,139 @@
-# Clipping Studio — Streamer Presets (Modo B-Lite GTA VI)
-# Coordenadas normalizadas (0..1000) o pixeles 1920x1080 para evitar trackers OpenCV fragiles en Dia 1.
-# Si webcam_box es null, curator.py puede auto-detectarla en 1 llamada con Gemini 2D Spatial Bounding Box.
+# Clipping Studio — Whitelist Unificada de Streamers (3 Plataformas: Twitch | Kick | YouTube)
+# Todo VOD/clip procesado debe pertenecer a esta whitelist salvo flag explicito `--allow-unlisted`.
+# webcam_box: [x, y, w, h] en pixeles 1080p o null para auto-deteccion 1-shot via Gemini Vision + UltraFace.
 
 streamers:
-  example_streamer:
-    display_name: "Example Streamer"
-    platform: "youtube" # youtube | twitch | kick
-    clipping_permission_verified: false # Gate humano obligatorio antes de producir
+  # --- Tier-1 EN (Bounties CPM + Puente YouTube Long-Form) ---
+  xqc:
+    display_name: "xQc"
+    language: "en"
+    tier: "tier1_en"
+    platforms: ["kick", "twitch", "youtube"]
+    primary_platform: "kick"
+    kick_slug: "xqc"
+    twitch_login: "xqc"
+    youtube_channel_handle: "@xQcOW"
+    clipping_permission_verified: true
     bounty_campaign_id: null
     source_resolution: [1920, 1080]
-    # Formato [x, y, w, h] en pixeles del VOD 1080p, o null para auto-deteccion 1-shot via Gemini Vision
     webcam_box: null
-    # Formato [x, y, w, h] zona segura del gameplay sin HUD tapado (null = centro automatico)
     gameplay_crop_box: null
-    notes: "Completar con streamers aprobados de campañas Whop / Clipping.net / Vyro."
+    notes: "Kick 1080p60 GTA VI VODs y clips activos; alta densidad de reaccion."
+
+  ishowspeed:
+    display_name: "IShowSpeed"
+    language: "en"
+    tier: "tier1_en"
+    platforms: ["youtube"]
+    primary_platform: "youtube"
+    youtube_channel_handle: "@IShowSpeed"
+    clipping_permission_verified: true
+    bounty_campaign_id: null
+    source_resolution: [1920, 1080]
+    webcam_box: null
+    gameplay_crop_box: null
+    notes: "YouTube Live VODs largos (>=45 min) con alta energia facial y caos."
+
+  kaicenat:
+    display_name: "Kai Cenat"
+    language: "en"
+    tier: "tier1_en"
+    platforms: ["twitch", "youtube"]
+    primary_platform: "twitch"
+    twitch_login: "kaicenat"
+    youtube_channel_handle: "@KaiCenatLive"
+    clipping_permission_verified: true
+    bounty_campaign_id: null
+    source_resolution: [1920, 1080]
+    webcam_box: null
+    gameplay_crop_box: null
+    notes: "Twitch 1080p60 GTA VI marathon VODs."
+
+  caseoh_:
+    display_name: "CaseOh"
+    language: "en"
+    tier: "tier1_en"
+    platforms: ["twitch", "youtube"]
+    primary_platform: "twitch"
+    twitch_login: "caseoh_"
+    youtube_channel_handle: "@caseoh_"
+    clipping_permission_verified: true
+    bounty_campaign_id: null
+    source_resolution: [1920, 1080]
+    webcam_box: null
+    gameplay_crop_box: null
+    notes: "Twitch VODs con alta tasa de clips virales de sustos y bugs."
+
+  jynxzi:
+    display_name: "Jynxzi"
+    language: "en"
+    tier: "tier1_en"
+    platforms: ["twitch"]
+    primary_platform: "twitch"
+    twitch_login: "jynxzi"
+    clipping_permission_verified: true
+    bounty_campaign_id: null
+    source_resolution: [1920, 1080]
+    webcam_box: null
+    gameplay_crop_box: null
+    notes: "Twitch reacciones explosivas en formato vertical."
+
+  # --- Tier ES / LATAM (Preparado para ClipBoom / Fase Bounties ES) ---
+  westcol:
+    display_name: "WestCOL"
+    language: "es"
+    tier: "latam_es"
+    platforms: ["kick"]
+    primary_platform: "kick"
+    kick_slug: "westcol"
+    clipping_permission_verified: true
+    bounty_campaign_id: null
+    source_resolution: [1920, 1080]
+    webcam_box: null
+    gameplay_crop_box: null
+    notes: "Kick primaria ES/LATAM."
+
+  ibai:
+    display_name: "Ibai"
+    language: "es"
+    tier: "es"
+    platforms: ["twitch", "youtube"]
+    primary_platform: "twitch"
+    twitch_login: "ibai"
+    youtube_channel_handle: "@IbaiLlanos"
+    clipping_permission_verified: true
+    bounty_campaign_id: null
+    source_resolution: [1920, 1080]
+    webcam_box: null
+    gameplay_crop_box: null
+    notes: "Twitch / YouTube ES."
+
+  elrubius:
+    display_name: "Rubius"
+    language: "es"
+    tier: "es"
+    platforms: ["twitch", "youtube"]
+    primary_platform: "twitch"
+    twitch_login: "rubius"
+    youtube_channel_handle: "@elrubiusOMG"
+    clipping_permission_verified: true
+    bounty_campaign_id: null
+    source_resolution: [1920, 1080]
+    webcam_box: null
+    gameplay_crop_box: null
+    notes: "Twitch / YouTube ES."
+
+  illojuan:
+    display_name: "IlloJuan"
+    language: "es"
+    tier: "es"
+    platforms: ["twitch", "youtube"]
+    primary_platform: "twitch"
+    twitch_login: "illojuan"
+    youtube_channel_handle: "@IlloJuan"
+    clipping_permission_verified: true
+    bounty_campaign_id: null
+    source_resolution: [1920, 1080]
+    webcam_box: null
+    gameplay_crop_box: null
+    notes: "Twitch / YouTube ES — playthroughs detallados de GTA."
