@@ -17,7 +17,7 @@ description: >-
 2. **Montaje Motivado (Walter Murch *Rule of Six* + Bruce Block):**
    - **Jerarquía de Murch:** Emoción (51%) > Historia (23%) > Ritmo (10%) > Trazado Ocular (7%) > Plano 2D (5%) > Espacio 3D (4%). Jamás cortar con metrónomo robótico cada 1.5s–1.8s.
    - **Acción -> Reacción (Frame 0 vivo):** El segundo `0.0` abre en el evento visual o frase detonante, nunca en saludo, preámbulo muerto ni placa estática.
-   - **Contraste Visual (*Bruce Block*):** Alternar *setup* estable con *payoff* de alta intensidad (`punch-in zoom` `1.10x–1.12x`, micro-SFX motivado `-16/-18 dB`, máx. 1 freeze-frame callout `0.6s–0.9s`).
+   - **Contraste Visual (*Bruce Block* + *Hayden Hillier-Smith*):** Alternar *setup* estable con *payoff* de alta intensidad (`punch-in zoom` `1.10x–1.12x` cut-guarded con `PySceneDetect`, micro-SFX motivado `-16/-18 dB` y máx. 1 `motion_overlay` RGBA fluido `1.5s–2.5s` sin congelar el video — prohibido *freeze-frames* antifuncionales o callouts estáticos pequeños).
    - **Seamless Loop (`APV >= 100%`):** Cortar el cierre exactamente en el clímax/remate sin cola muerta ni despedida para disparar repeticiones orgánicas.
    - **Momentos Visuales Silenciosos (ClipKaro Contact-Sheet):** Revisar frames cuando el streamer queda mudo ante un bug/choque viral.
    - **Contexto Vivo:** Consultar `context/gta6_living_brief.md` y `context/viral_style_dna.json`.

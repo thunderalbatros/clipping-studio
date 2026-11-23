@@ -25,23 +25,24 @@
 3. **Limpieza Selectiva de Aire Muerto:**
    - Eliminar silencios muertos >0.45s, pantallas BRB/carga y muletillas ("um", "uh").
    - **Excepción crítica (*Synchresis* — Michel Chion / Celia Hodent):** Conservar micro-silencios de **0.20s–0.35s** justo antes de un remate o explosión, y nunca cortar pausas llenas de disparos, motores o tensión visual inminente.
-4. **Freeze-Frame con Callout (Uso Quirúrgico):**
-   - Máximo **1 por clip** en el pico cómico o de caos (duración `0.6s–0.9s`, texto breve <= 4 palabras, encuadre limpio con Pillow).
+4. **Motion-Graphics Overlay Fluido (Cero Freeze-Frame Antifuncional — Regla 05):**
+   - Prohibido congelar el video (`freeze-frame`) rompiendo la fluidez o dibujar callouts estáticos pequeños.
+   - Máximo **1 `motion_overlay` RGBA animado por clip** en el pico cómico/caos (`1.5s–2.5s`, tipografía monumental `Montserrat Black`, escala editorial con transición suave y micro-SFX sincronizado a `-16/-18 dB`) mientras el video sigue corriendo fluido.
 
 ---
 
 ## 3. Composición Visual 9:16 (`1080x1920`) y Safe-Zones Móviles
 Referencia de QA físico: **Samsung Galaxy A36** (pantalla vertical real en TikTok, YouTube Shorts e Instagram Reels).
 
-- **Layout Primario GTA VI (Webcam + Gameplay):**
-  - **Zona superior/central (`~62%–68%`):** Gameplay 9:16 recortado sobre la acción principal (evitar cortar HUD crítico de misión/vida).
-  - **Zona webcam (`~32%–38%`):** Crop estable de la cámara del streamer (detectada vía Gemini 2D Spatial Bounding Box `[ymin, xmin, ymax, xmax]` escala `0–1000` o preset fijo por streamer; nunca dejar que rostros de NPCs capturen el foco).
-  - **Costura central (entre gameplay y webcam):** Ubicación primaria de subtítulos karaoke.
+- **Layout Primario GTA VI (`webcam_position: "top"`):**
+  - **Banda superior (`~36%` / `692 px`):** Tarjeta webcam redondeada del streamer (`<= 1.8x`, anclada bajo `y = 180` sobre fondo ambiental difuminado, nunca vacío negro plano; detectada vía UltraFace + Gemini 2D Spatial Bounding Box `[ymin, xmin, ymax, xmax]` escala `0–1000`, nunca capturando rostros de NPCs).
+  - **Banda inferior (`~64%` / `1228 px`):** Gameplay `1080p60` centrado sobre la acción principal con exclusión geométrica `+48 px` (`no_webcam_gameplay_overlap == True`).
+  - **Costura central (entre webcam y gameplay):** Ubicación primaria de subtítulos `Montserrat Black` discretos y `motion_overlay`.
 - **Safe-Zones Intocables (Margen libre de texto y callouts):**
-  - **Superior:** `top 14%` (~270 px) libre (barra de estado + pestañas de la app).
-  - **Derecha:** `right 15%` (~160 px) libre (columna de like/comentarios/compartir).
-  - **Inferior:** `bottom 22%` (~420 px) libre (usuario, descripción, barra de audio).
-  - **Izquierda:** `left 6%` (~65 px) de respiro mínimo.
+  - **Superior:** `top 14%` (`~270 px`; `y >= 180` para tarjeta webcam) libre.
+  - **Derecha:** `right 18%` (`x <= 888 px`) libre (columna universal de botones Like/Comentarios/Compartir en Shorts/TikTok/Reels).
+  - **Inferior:** `bottom 35%` (`y <= 1248 px` para subtítulos/callouts; `bottom 22%` mínimo visual).
+  - **Izquierda:** `left 4.5%–6%` (`x >= 48–65 px`) de respiro mínimo.
 - **Reglas de Subtítulos Karaoke (`pysubs2` + `libass`):**
   - Máximo **2 a 4 palabras por golpe**, 1–2 líneas, fuente sans-serif bold limpia con trazo oscuro nítido (`Outline 4`, `Shadow 0–1`), palabra activa resaltada en color de acento (amarillo/blanco o acento del canal).
   - **Regla anti-duplicación (patrón ClipKaro):** Subtitular **solo** al streamer y amigos en Discord; **nunca** subtitular líneas de personajes/NPCs de GTA VI (el juego ya muestra sus propios subtítulos). Palabras ininteligibles se omiten antes que imprimir errores.

@@ -1,49 +1,54 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "updated_at": "2026-11-23",
   "platforms": {
     "youtube_shorts": {
-      "architecture": "Pull system -> Two-Tower Candidate Generation (co-watching) -> MMoE Multitask Ranking (Engagement vs Viewer Satisfaction Surveys)",
+      "architecture": "Pull system -> Two-Tower Candidate Generation (Covington 2016 + Example Age freshness boost) -> MMoE Multitask Ranking + Shallow Tower debiasing (Zhao 2019) + Off-Policy long-term session reward (Chen 2019)",
       "primary_gates": {
         "vvsa_viral_pct": 70.0,
         "vvsa_fail_pct": 50.0,
         "apv_target_pct": 100.0,
-        "ideal_duration_sec": [20, 45]
+        "ideal_duration_sec": [20, 45],
+        "max_shorts_duration_sec": 180,
+        "monetization_metric": "engaged_views_only (post-March 31 2025 public views count from frame 0; YPP & Shorts Pool strictly require Engaged Views)"
       },
       "key_levers": [
-        "Frame-0 instant action (zero dead air or greeting)",
+        "Publish within 2-6h of viral stream moment to capture Example Age exploration boost",
+        "Frame-0 instant action (zero dead air, greeting, or static plaque)",
         "Seamless loop cut right on climax resolution (prevents 20-25% final-second drop)",
         "Shorts Search SEO: front-loaded title <=55 chars + spoken ASR keywords + 3-5 hashtags",
-        "Zero cross-platform watermarks"
+        "Zero cross-platform watermarks; use Related Video link to bridge to 8+ min Long-Form"
       ],
       "monetization_compliance": {
         "bounties_channel_voice_mode": "none",
         "owned_ypp_channel_voice_mode": "human_batch",
-        "reused_content_rule": "YPP human review evaluates entire channel; raw streamer clips with only captions/TTS fail Reused/Inauthentic Content even with creator permission."
+        "inauthentic_content_rule_july_2025": "YPP evaluates entire channel; mass-produced templated clips or raw streamer clips with only captions/TTS fail Reused/Inauthentic Content even with creator permission."
       },
       "cover_spec": {
         "canvas_px": [1080, 1920],
         "desktop_custom_upload": true,
-        "api_method": "youtube.thumbnails.set (call after video processing finishes)",
+        "api_method": "youtube.thumbnails.set (after processing)",
         "home_crop_risk": "4:5 centered"
       }
     },
     "instagram_reels": {
-      "architecture": "Meta AI Staged Distribution + Andromeda Deep Semantic Retrieval + UTIS Satisfaction Surveys + Originality Score",
+      "architecture": "Meta Andromeda dense neural retrieval + GEM generative multimodal ranking + Lattice + UTIS Satisfaction Surveys + Originality Score",
       "primary_gates": {
-        "rank_1_signal": "watch_time_and_rewatch_rate",
+        "rank_1_negative_gate": "3s_skip_rate",
+        "rank_1_positive_signal": "watch_time_and_rewatch_rate",
         "rank_2_unconnected_signal": "sends_per_reach_dm_shares",
-        "rank_3_signal": "likes_per_reach"
+        "rank_3_connected_signal": "likes_per_reach",
+        "max_hashtags": 5
       },
       "key_levers": [
         "DM-shareable hook and CTA ('Send this to your duo...')",
-        "Trial Reels native 72h cold-audience A/B testing for distinct 0-3s hook variants",
-        "Zero TikTok/CapCut watermarks (preserves Originality Score)"
+        "Trial Reels native 24-72h cold-audience A/B testing for distinct 0-3s hook variants",
+        "Substantial visual transformation (split-screen + motion graphics + captions) with zero watermarks"
       ],
       "penalties": [
-        "Hollow engagement bait ('Comment YES')",
+        "10+ unoriginal posts in rolling 30-day window -> full account removal from ALL recommendations",
         "Reposting identical MP4 repeatedly in Trial Reels",
-        "Unoriginal aggregator watermarks"
+        "Hollow engagement bait ('Comment YES') or >5 spam hashtags"
       ],
       "cover_spec": {
         "canvas_px": [1080, 1920],
@@ -53,37 +58,37 @@
       }
     },
     "tiktok": {
-      "architecture": "ByteDance Monolith (Cuckoo HashMap collisionless embedding tables + Kafka/Flink real-time streaming updates + MMoE fine-ranking)",
+      "architecture": "ByteDance Monolith (Liu 2022: Cuckoo HashMap collisionless expirable embeddings + Kafka/Flink minute-level streaming online training + MMoE fine-ranking)",
       "primary_gates": {
         "seed_batch_views": [200, 500],
-        "core_signals": ["3s_hold", "completion_rate", "rewatch_rate", "shares", "saves", "conversational_comments"]
+        "core_signals": ["3s_hold_70pct+", "watch_time_18_25s_for_30_60s", "completion_100pct+_under_15s", "share_rate_1pct+", "save_rate_2pct+"]
       },
       "key_levers": [
-        "Triple-indexed TikTok Search SEO: spoken ASR + on-screen OCR text + caption",
-        "Safe A/B recycling: transform 0-3s hook, on-screen banner, and re-encode hash before reposting failed variant",
-        "Strict 0-7.5s profanity bleeper + OCR text masking to prevent automated FYF suppression"
+        "Quad-indexed TikTok Search SEO: spoken ASR + on-screen OCR + caption + comment keywords (blue search links)",
+        "Publish fast with genuine split-screen/caption/audio transformation to beat pHash & Audio ID unoriginality filters",
+        "Safe A/B recycling: transform 0-3s hook, motion banner, and re-encode hash before reposting failed variant",
+        "Strict 0-7.5s profanity bleeper + OCR masking to prevent FYF suppression"
       ],
       "penalties": [
-        "OCR-flagged profanity/sensitive words",
-        "Duplicate perceptual hash re-uploads",
-        "Competitor watermarks",
-        "Bot comments / coordinated sock-puppet engagement"
+        "Unoriginal content / cross-platform pHash match -> Ineligible for FYF",
+        "OCR-flagged profanity/sensitive words in 0-7.5s",
+        "Competitor watermarks or coordinated bot comments"
       ],
       "cover_spec": {
         "canvas_px": [1080, 1920],
         "profile_grid_safe_crop": "1:1 centered (1080x1080, y=420..1500)",
-        "organic_api_param": "post_info.video_cover_timestamp_ms (no external JPG upload in organic Content Posting API)"
+        "organic_api_param": "post_info.video_cover_timestamp_ms"
       }
     },
     "facebook_reels": {
-      "architecture": "Meta AI Unified Video Ranking + Facebook Content Monetization Program + Strict Originality Guidelines",
+      "architecture": "Meta AI Unified Video Ranking (Andromeda + GEM) + Facebook Content Monetization Program + Strict Originality Guidelines",
       "primary_gates": {
         "core_signals": ["completion_rate", "shares", "rewatches", "meaningful_comment_threads"]
       },
       "key_levers": [
-        "Nostalgic/community-debate 1-2 line caption (avoid keyword/hashtag stuffing)",
+        "Nostalgic/community-debate 1-2 line caption (zero hashtag stuffing)",
         "Custom 1080x1920 cover uploaded via Meta Business Suite",
-        "Strict adherence to top 14% / bottom 35% / sides 6% UI margins"
+        "Strict top 14% / bottom 35% / sides 6% UI margins"
       ],
       "penalties": [
         "Direct reposts without transformative value",
@@ -96,42 +101,65 @@
       }
     },
     "x_twitter": {
-      "architecture": "xai-org/x-algorithm: SimClusters (~145k communities) + TwHIN Graph Embeddings + Phoenix Rust/Python Transformer Heavy Ranker",
-      "verified_weights": {
-        "reply_with_author_engagement": 75.0,
-        "standard_reply": 13.5,
-        "repost": 1.0,
-        "like": 0.5,
-        "external_link_reach_penalty_pct": [-50, -30]
+      "architecture": "xai-org/x-algorithm (Oct-Nov 2026 Rust home-mixer + JAX/Grok Phoenix Transformer predicting 30 weighted probability/dwell terms + Thompson Sampling author cold-start)",
+      "verified_source_weights_nov_2026": {
+        "share_via_copy_link": 20.0,
+        "reply_bidirectional_follow": 20.0,
+        "reply_standard": 5.0,
+        "share_via_dm": 5.0,
+        "quote": 5.0,
+        "follow_author": 4.0,
+        "share": 2.118,
+        "retweet": 1.0,
+        "favorite_like": 0.708,
+        "cont_click_dwell_time": 0.385,
+        "report": -234.0,
+        "mute_author": -58.8,
+        "not_interested": -53.07,
+        "block_author": -31.2
+      },
+      "verified_source_guards_nov_2026": {
+        "min_video_duration_ms_for_vqv": 10000,
+        "cold_start_follower_cap": 50000,
+        "cold_start_impression_threshold": 200,
+        "cold_start_max_post_age_secs": 7200,
+        "video_carousel_embedding_dedupe_threshold": 0.72,
+        "video_carousel_fatigue_minutes": 60,
+        "direct_url_pod_ranking_impact": 0.0
       },
       "key_levers": [
-        "Native MP4 upload targeting >=50% and 100% video watch-through + dwell time",
-        "Zero external links in main post (use link-in-reply to promote YouTube Long-Form)",
-        "Organic author reply to early real comments (triggers ~75x / 150x-like multiplier; zero bots)"
+        "Optimize for Copy-Link shares (+20.0), DM shares (+5.0), Quotes (+5.0), and Replies (+5.0/+20.0 mutual) — NOT passive likes (0.708)",
+        "Keep every X video >=12s (MinVideoDurationMs=10000) and upload native MP4 within <2h peak window for Thompson Sampling cold-start",
+        "Visually transform layout/motion-graphics so video embedding cosine stays <0.72 vs raw stream reposts",
+        "Space posts >=3h apart (author_diversity_decay + 60m video carousel fatigue) and use link-in-reply (never external URL in main post)"
       ],
       "penalties": [
         "External URLs in primary post",
-        "Toxic rage bait causing Reports, Blocks, Mutes, or Show Less Often"
+        "High-risk/NSFW frames (blocked by EnableVideoCarouselHighRiskFilter)",
+        "Toxic rage bait triggering Reports (-234), Mutes (-58.8), NotInterested (-53.07), Blocks (-31.2)"
       ]
     }
   },
   "universal_cover_safe_box_9_16_px": {
     "canvas": [1080, 1920],
-    "safe_rect_xyxy": [90, 420, 990, 1250],
+    "safe_rect_xyxy": [90, 420, 888, 1250],
     "recommended_hook_band_y": [670, 830]
   },
-  "creator_frameworks": {
-    "paddy_galloway_ccn": "Satisfy Core (lore/callbacks), Casual (quick re-onboarding), and New (zero-context instant visual hook) simultaneously; <=3 thumbnail elements; complementary title + visual curiosity gap.",
-    "jenny_hoyos_shorts": "Frame-1 visual shock -> <3s clear stakes/foreshadowing -> cut cleanly on climax resolution (avoid 20-25% final-second cliff) -> 5th-grade reading ease.",
-    "kallaway_triple_hook": "Strict alignment of Visual Hook (mute-understandable) + Audio Hook (context lean) + Text Hook (disruptive pattern interrupt).",
-    "brendan_kane_hook_point": "Hyper-specific or counter-intuitive 3-second hook; iterate structural viral templates.",
-    "derral_eves_youtube_formula": "Algorithm tracks viewer behavior (CTR x Retention); iterate systematically on retention drop-off timestamps.",
-    "mrbeast_production_memo": "Obsess over opening hook and minutes 1-3 in Long-Form; keep structure radically simple inside high-stakes action."
+  "creator_and_cognitive_frameworks": {
+    "loewenstein_information_gap": "Curiosity requires a minimal knowledge anchor + an explicit missing outcome; show stakes in 0-2s and withhold resolution until final 15-20%.",
+    "heath_made_to_stick_success": "Simple (1 conflict), Unexpected (schema break in 0-3s), Concrete (visual stakes), Credible (genuine reaction), Emotional (high arousal -> shares), Stories (30s micro-arc).",
+    "kahneman_cognitive_ease": "Scroll feed runs on System 1; enforce 5th-grade captions, <=3 words/hit, APCA >=75, <=3 visual anchors so System 2 friction never triggers swipe-away.",
+    "hillier_smith_retention_editing": "Pacing is emotional contrast (tension & release), not robotic 1.5s cuts; every cut/zoom/overlay must be motivated and never smother authentic streamer emotion.",
+    "paddy_galloway_ccn": "Satisfy Core (lore), Casual (1-2s context), and New (zero-context visual hook); <=3 cover elements + complementary title/cover curiosity gap.",
+    "jenny_hoyos_shorts": "Frame-1 shock -> <3s clear stakes -> cut cleanly on climax resolution (avoid 20-25% final-second cliff).",
+    "kallaway_triple_hook": "Align Visual Hook (mute-readable) + Audio Hook (context lean) + Text Hook (pattern interrupt).",
+    "derral_eves_youtube_formula": "Algorithm follows audience behavior (CTR x Retention); diagnose drop-off timestamps systematically."
   },
   "strict_ban_red_lines": [
-    "NEVER use secondary sock-puppet accounts, Playwright comment bots, or anti-detect browsers (Multilogin/Dolphin Anty)",
+    "NEVER use sock-puppet accounts, engagement pods (0 ranking impact in X scoring.rs), Playwright comment bots, or anti-detect browsers",
     "NEVER repost identical failed MP4s without transforming 0-3s hook and visual hash",
-    "NEVER upload cross-platform watermarked exports",
-    "NEVER mix raw Bounties CPM clips (voice_mode=none) onto an Owned YPP AdSense channel without human commentary transformation"
+    "NEVER post >=10 unoriginal clips in 30 days on Instagram (account-wide recommendation ban)",
+    "NEVER upload cross-platform watermarked exports or post <3h apart on the same network",
+    "NEVER mix raw Bounties CPM clips (voice_mode=none) onto an Owned YPP AdSense channel"
   ]
 }
