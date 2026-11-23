@@ -33,7 +33,14 @@ from dotenv import load_dotenv
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.db import DEFAULT_DB_PATH, get_scene_blueprint, insert_telemetry, upsert_scene_blueprint
+from src.db import (
+    DEFAULT_DB_PATH,
+    _connect,
+    get_scene_blueprint,
+    init_db,
+    insert_telemetry,
+    upsert_scene_blueprint,
+)
 from src.llm_router import generate_structured
 from src.miner import PROJECT_ROOT, _ensure_media_path, fetch_kick_gta6_clips, find_deno_executable, load_whitelist
 from src.rag_engine import query_rag
@@ -86,6 +93,83 @@ _STOPWORDS = frozenset(
         "gameplay",
     }
 )
+
+
+DEFAULT_MIN_VIEWS_YOUTUBE = 5000
+DEFAULT_MIN_VPH_YOUTUBE = 50.0
+DEFAULT_MIN_VIEWS_CLIPS = 1000
+_CLIP_PLATFORMS = frozenset({"kick_clips", "kick", "twitch_clips", "twitch"})
+
+
+def meets_viral_traction_floor(
+    platform: str,
+    views: int,
+    views_per_hour: float,
+    *,
+    min_views_yt: int = DEFAULT_MIN_VIEWS_YOUTUBE,
+    min_vph_yt: float = DEFAULT_MIN_VPH_YOUTUBE,
+    min_views_clips: int = DEFAULT_MIN_VIEWS_CLIPS,
+) -> bool:
+    """Enforce minimum viral traction floor for Level 1 references (rejects small amateur uploads)."""
+    plat = (platform or "youtube_shorts").strip().lower()
+    if plat in _CLIP_PLATFORMS:
+        return int(views) >= int(min_views_clips)
+    return int(views) >= int(min_views_yt) or float(views_per_hour) >= float(min_vph_yt)
+
+
+def is_blueprint_contaminated(
+    blueprint: SceneBlueprint,
+    *,
+    min_views_yt: int = DEFAULT_MIN_VIEWS_YOUTUBE,
+    min_vph_yt: float = DEFAULT_MIN_VPH_YOUTUBE,
+    min_views_clips: int = DEFAULT_MIN_VIEWS_CLIPS,
+) -> bool:
+    """Return True if a Level 1 SceneBlueprint has <2 references or any reference below the viral floor."""
+    if blueprint.match_level != "exact_scene_match":
+        return False
+    if len(blueprint.references) < 2:
+        return True
+    return any(
+        not meets_viral_traction_floor(
+            r.platform,
+            r.views,
+            r.views_per_hour,
+            min_views_yt=min_views_yt,
+            min_vph_yt=min_vph_yt,
+            min_views_clips=min_views_clips,
+        )
+        for r in blueprint.references
+    )
+
+
+def purge_contaminated_scene_blueprints(
+    db_path: Path = DEFAULT_DB_PATH,
+    *,
+    min_views_yt: int = DEFAULT_MIN_VIEWS_YOUTUBE,
+    min_vph_yt: float = DEFAULT_MIN_VPH_YOUTUBE,
+    min_views_clips: int = DEFAULT_MIN_VIEWS_CLIPS,
+) -> list[str]:
+    """Invalidate and delete cached `scene_blueprints` entries containing sub-threshold references."""
+    init_db(db_path)
+    removed: list[str] = []
+    with _connect(db_path) as conn:
+        rows = conn.execute("SELECT scene_key, blueprint_json FROM scene_blueprints").fetchall()
+        for row in rows:
+            skey = str(row["scene_key"])
+            try:
+                bp = SceneBlueprint.model_validate_json(str(row["blueprint_json"]))
+                contaminated = is_blueprint_contaminated(
+                    bp,
+                    min_views_yt=min_views_yt,
+                    min_vph_yt=min_vph_yt,
+                    min_views_clips=min_views_clips,
+                )
+            except Exception:
+                contaminated = True
+            if contaminated:
+                conn.execute("DELETE FROM scene_blueprints WHERE scene_key = ?", (skey,))
+                removed.append(skey)
+    return removed
 
 
 class _SceneRefMultimodalAudit(BaseModel):
@@ -755,11 +839,14 @@ def research_scene(
     force_refresh: bool = False,
     use_multimodal: bool = True,
     db_path: Path = DEFAULT_DB_PATH,
+    min_views_yt: int = DEFAULT_MIN_VIEWS_YOUTUBE,
+    min_vph_yt: float = DEFAULT_MIN_VPH_YOUTUBE,
+    min_views_clips: int = DEFAULT_MIN_VIEWS_CLIPS,
     search_yt_fn: Any = None,
     search_kick_fn: Any = None,
     deconstruct_fn: Any = None,
 ) -> SceneBlueprint:
-    """Run 2-Level Scene-Match Intelligence with SQLite cache (`scene_blueprints`) and guaranteed temp MP4 purge."""
+    """Run 2-Level Scene-Match Intelligence with viral traction floor, SQLite cache (`scene_blueprints`) and temp MP4 purge."""
     queries = build_scene_queries(
         scene_query=scene_query,
         transcript=transcript,
@@ -770,13 +857,22 @@ def research_scene(
     canonical_query = scene_query.strip() or queries[0]
     scene_key = make_scene_key(game, canonical_query)
 
-    # Cache hit check
+    # Cache hit check (auto-invalidate any stale Level 1 blueprint contaminated by sub-threshold refs)
     if not force_refresh:
         cached = get_scene_blueprint(scene_key, db_path=db_path)
         if cached is not None:
             bp = SceneBlueprint.model_validate_json(str(cached["blueprint_json"]))
-            bp.cache_hit = True
-            return bp
+            if is_blueprint_contaminated(
+                bp,
+                min_views_yt=min_views_yt,
+                min_vph_yt=min_vph_yt,
+                min_views_clips=min_views_clips,
+            ):
+                with _connect(db_path) as conn:
+                    conn.execute("DELETE FROM scene_blueprints WHERE scene_key = ?", (scene_key,))
+            else:
+                bp.cache_hit = True
+                return bp
 
     yt_search = search_yt_fn or search_youtube_shorts_for_scene
     kick_search = search_kick_fn or search_kick_clips_for_scene
@@ -799,11 +895,23 @@ def research_scene(
             seen_urls.add(u)
             raw_pool.append(item)
 
-    # Filter strictly <= 65s short-form and require genuine scene-specific keyword relevance (excluding game tokens)
+    # Filter strictly <= 65s short-form, enforce viral traction floor, and require scene-specific keyword relevance
     game_tokens = set(re.findall(r"[a-z0-9]+", game.lower())) | {"gta", "vi", "gta6", "gtavi"}
     scene_only_tokens = set(_extract_keywords(canonical_query, limit=10)) - game_tokens
     q_tokens = scene_only_tokens or set(_extract_keywords(f"{game} {canonical_query}", limit=10))
-    valid_pool = [c for c in raw_pool if 0.0 < float(c.get("duration_sec") or 0.0) <= 65.0]
+    valid_pool = [
+        c
+        for c in raw_pool
+        if 0.0 < float(c.get("duration_sec") or 0.0) <= 65.0
+        and meets_viral_traction_floor(
+            str(c.get("platform") or "youtube_shorts"),
+            int(c.get("views") or 0),
+            float(c.get("views_per_hour") or 0.0),
+            min_views_yt=min_views_yt,
+            min_vph_yt=min_vph_yt,
+            min_views_clips=min_views_clips,
+        )
+    ]
     vphs = [max(1.0, float(c.get("views_per_hour") or 1.0)) for c in valid_pool]
     med_vph = statistics.median(vphs) if vphs else 1.0
 
@@ -822,15 +930,22 @@ def research_scene(
         scored.append((score, outlier_ratio, c))
 
     scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    top_candidates = scored[: max(2, min(5, max_refs + 2))]
-
     deconstructed: list[SceneReferenceItem] = []
-    for _, outlier_ratio, cand in top_candidates:
-        if len(deconstructed) >= max_refs:
-            break
-        item = deconstruct(cand, outlier_ratio=outlier_ratio, use_multimodal=use_multimodal)
-        if item is not None:
-            deconstructed.append(item)
+    if len(scored) >= 2:
+        top_candidates = scored[: max(2, min(5, max_refs + 2))]
+        for _, outlier_ratio, cand in top_candidates:
+            if len(deconstructed) >= max_refs:
+                break
+            item = deconstruct(cand, outlier_ratio=outlier_ratio, use_multimodal=use_multimodal)
+            if item is not None and meets_viral_traction_floor(
+                item.platform,
+                item.views,
+                item.views_per_hour,
+                min_views_yt=min_views_yt,
+                min_vph_yt=min_vph_yt,
+                min_views_clips=min_views_clips,
+            ):
+                deconstructed.append(item)
 
     if len(deconstructed) >= 2:
         blueprint = _synthesize_blueprint_from_refs(scene_key, game, canonical_query, deconstructed)

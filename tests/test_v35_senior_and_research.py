@@ -20,6 +20,7 @@ from src.db import (
     init_db,
     list_creators,
     seed_creators_from_yaml,
+    upsert_scene_blueprint,
 )
 from src.miner import auto_profile_creator, validate_streamer_whitelist
 from src.renderer import (
@@ -33,6 +34,8 @@ from src.scene_researcher import (
     build_scene_queries,
     format_blueprint_for_prompt,
     make_scene_key,
+    meets_viral_traction_floor,
+    purge_contaminated_scene_blueprints,
     research_scene,
 )
 from src.schemas import (
@@ -40,6 +43,7 @@ from src.schemas import (
     EditPlan,
     FreezeFrameSpec,
     NonVerbalEvent,
+    SceneBlueprint,
     SceneReferenceItem,
     WordTimestamp,
 )
@@ -287,6 +291,209 @@ def test_scene_researcher_level1_cache_and_level2_fallback(tmp_path: Path) -> No
     assert bp_fb.match_level == "archetype_fallback"
     assert bp_fb.references == []
     assert bp_fb.target_duration_range_sec[0] >= 16.0
+
+
+def test_scene_researcher_viral_floor_fallback_and_cache_purge(tmp_path: Path) -> None:
+    # Direct floor checks (YouTube Shorts: min_views >= 5000 OR min_vph >= 50; Kick/Twitch: min_views >= 1000)
+    assert meets_viral_traction_floor("youtube_shorts", 185, 5.0) is False
+    assert meets_viral_traction_floor("youtube_shorts", 3, 0.0) is False
+    assert meets_viral_traction_floor("youtube_shorts", 5000, 12.0) is True
+    assert meets_viral_traction_floor("youtube_shorts", 1200, 50.0) is True
+    assert meets_viral_traction_floor("kick_clips", 999, 250.0) is False
+    assert meets_viral_traction_floor("kick_clips", 1000, 10.0) is True
+    assert meets_viral_traction_floor("twitch_clips", 1200, 5.0) is True
+    assert meets_viral_traction_floor("youtube_shorts", 3000, 20.0, min_views_yt=2500) is True
+
+    db_file = tmp_path / "floor_test.db"
+    init_db(db_file)
+
+    # Pool with only 1 truly viral YT Short + 2 amateur uploads (185v/5vph & 3v/0vph) + 1 small Kick clip (420v)
+    mixed_yt = [
+        {
+            "platform": "youtube_shorts",
+            "source_id": "amateur1",
+            "channel": "SmallCh",
+            "title": "He SET A CAR ON FIRE in GTA 6! Donnie gas can explosion #shorts",
+            "url": "https://www.youtube.com/shorts/amateur1",
+            "duration_sec": 28.0,
+            "views": 185,
+            "likes": 4,
+            "comments": 0,
+            "views_per_hour": 5.0,
+        },
+        {
+            "platform": "youtube_shorts",
+            "source_id": "amateur2",
+            "channel": "TinyCh",
+            "title": "GTA 6 Donnie Car Fire Explosion #shorts",
+            "url": "https://www.youtube.com/shorts/amateur2",
+            "duration_sec": 22.0,
+            "views": 3,
+            "likes": 0,
+            "comments": 0,
+            "views_per_hour": 0.0,
+        },
+        {
+            "platform": "youtube_shorts",
+            "source_id": "viral1",
+            "channel": "BigClips",
+            "title": "xQc GTA 6 Donnie car gas can explosion #shorts",
+            "url": "https://www.youtube.com/shorts/viral1",
+            "duration_sec": 29.0,
+            "views": 66931,
+            "likes": 3100,
+            "comments": 85,
+            "views_per_hour": 536.1,
+        },
+    ]
+    small_kick = [
+        {
+            "platform": "kick_clips",
+            "source_id": "k1",
+            "channel": "kicksmall",
+            "title": "Donnie car fire gas can explosion",
+            "url": "https://kick.com/kicksmall/clips/k1",
+            "duration_sec": 25.0,
+            "views": 420,
+            "likes": 12,
+            "comments": 0,
+            "views_per_hour": 30.0,
+        }
+    ]
+    deconstruct_calls = 0
+
+    def _counting_deconstruct(cand: dict[str, Any], *, outlier_ratio: float = 1.0, use_multimodal: bool = True) -> SceneReferenceItem:
+        nonlocal deconstruct_calls
+        deconstruct_calls += 1
+        return SceneReferenceItem(
+            platform=str(cand["platform"]),
+            source_id=str(cand["source_id"]),
+            channel=str(cand["channel"]),
+            title=str(cand["title"]),
+            url=str(cand["url"]),
+            duration_sec=float(cand["duration_sec"]),
+            views=int(cand["views"]),
+            views_per_hour=float(cand["views_per_hour"]),
+            outlier_ratio=outlier_ratio,
+        )
+
+    # Only 1 candidate survives the viral floor -> <2 valid refs -> automatic Level 2 archetype_fallback & 0 wasted deconstructs
+    bp = research_scene(
+        "Destroy Donnie car gas can fire explosion",
+        game="GTA VI",
+        db_path=db_file,
+        search_yt_fn=lambda _q, max_results=8: mixed_yt,
+        search_kick_fn=lambda _q, game="GTA VI", limit=4: small_kick,
+        deconstruct_fn=_counting_deconstruct,
+    )
+    assert bp.match_level == "archetype_fallback"
+    assert bp.references == []
+    assert deconstruct_calls == 0
+
+    # Seed a stale contaminated Level 1 blueprint and a clean Level 1 blueprint in scene_blueprints
+    stale_key = make_scene_key("GTA VI", "Stale contaminated Donnie scene")
+    stale_bp = SceneBlueprint(
+        scene_key=stale_key,
+        game="GTA VI",
+        scene_query="Stale contaminated Donnie scene",
+        match_level="exact_scene_match",
+        references=[
+            SceneReferenceItem(
+                platform="youtube_shorts",
+                source_id="am1",
+                title="Amateur ref",
+                url="https://www.youtube.com/shorts/am1",
+                duration_sec=25.0,
+                views=185,
+                views_per_hour=5.0,
+            ),
+            SceneReferenceItem(
+                platform="youtube_shorts",
+                source_id="ok1",
+                title="Viral ref",
+                url="https://www.youtube.com/shorts/ok1",
+                duration_sec=28.0,
+                views=66931,
+                views_per_hour=536.1,
+            ),
+        ],
+    )
+    upsert_scene_blueprint(
+        scene_key=stale_key,
+        game="GTA VI",
+        scene_query="Stale contaminated Donnie scene",
+        match_level="exact_scene_match",
+        references_count=2,
+        blueprint_json=stale_bp.model_dump_json(),
+        summary_prompt="stale",
+        db_path=db_file,
+    )
+
+    clean_key = make_scene_key("GTA VI", "Clean viral chase scene")
+    clean_bp = SceneBlueprint(
+        scene_key=clean_key,
+        game="GTA VI",
+        scene_query="Clean viral chase scene",
+        match_level="exact_scene_match",
+        references=[
+            SceneReferenceItem(
+                platform="youtube_shorts",
+                source_id="v1",
+                title="Viral 1",
+                url="https://www.youtube.com/shorts/v1",
+                duration_sec=25.0,
+                views=120000,
+                views_per_hour=900.0,
+            ),
+            SceneReferenceItem(
+                platform="kick_clips",
+                source_id="k2",
+                title="Viral Kick",
+                url="https://kick.com/x/clips/k2",
+                duration_sec=24.0,
+                views=2500,
+                views_per_hour=80.0,
+            ),
+        ],
+    )
+    upsert_scene_blueprint(
+        scene_key=clean_key,
+        game="GTA VI",
+        scene_query="Clean viral chase scene",
+        match_level="exact_scene_match",
+        references_count=2,
+        blueprint_json=clean_bp.model_dump_json(),
+        summary_prompt="clean",
+        db_path=db_file,
+    )
+
+    # Explicit purge removes only the contaminated blueprint and preserves clean + fallback entries
+    purged = purge_contaminated_scene_blueprints(db_path=db_file)
+    assert purged == [stale_key]
+    assert get_scene_blueprint(stale_key, db_path=db_file) is None
+    assert get_scene_blueprint(clean_key, db_path=db_file) is not None
+
+    # Re-seed stale entry and confirm research_scene auto-invalidates on read instead of returning cache_hit
+    upsert_scene_blueprint(
+        scene_key=stale_key,
+        game="GTA VI",
+        scene_query="Stale contaminated Donnie scene",
+        match_level="exact_scene_match",
+        references_count=2,
+        blueprint_json=stale_bp.model_dump_json(),
+        summary_prompt="stale",
+        db_path=db_file,
+    )
+    refreshed = research_scene(
+        "Stale contaminated Donnie scene",
+        game="GTA VI",
+        db_path=db_file,
+        search_yt_fn=lambda _q, max_results=8: [],
+        search_kick_fn=lambda _q, game="GTA VI", limit=4: [],
+        deconstruct_fn=_counting_deconstruct,
+    )
+    assert refreshed.cache_hit is False
+    assert refreshed.match_level == "archetype_fallback"
 
 
 def test_creators_table_yaml_seed_auto_profiler_and_ci_yaml(tmp_path: Path) -> None:
