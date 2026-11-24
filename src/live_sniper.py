@@ -8,6 +8,7 @@ into the deterministic Clipping Studio pipeline (`transcribe_run -> curate_run -
 from __future__ import annotations
 
 import asyncio
+import html
 import math
 import random
 import re
@@ -31,7 +32,10 @@ from src.db import insert_telemetry, upsert_slice, upsert_vod
 from src.miner import RUNS_DIR, _ensure_media_path, probe_kick_channel
 from src.notifier import send_telegram_message
 from src.resource_guard import heavy_local_allowed
+from src.runtime_paths import resolve_binary_str
 from src.schemas import CandidateSlice, RunState
+
+_CHANNEL_LOGIN_RE = re.compile(r"^[a-z0-9_]{2,32}$")
 
 _REACTION_RE = re.compile(
     r"\b(clip\s*it|lulw?|omegalul|kekw|no\s*way|wtf|bro+|lmao+|lmfao|holy|insane|crazy|cooked|rip|w+|l+|ooo+h?|ahaha+|jaja+)\b",
@@ -41,6 +45,14 @@ _SUBGIFT_RE = re.compile(
     r"(gifted a tier|is gifting \d+|subscribed at tier|months in a row|raiders from|prime gaming)",
     re.IGNORECASE,
 )
+def validate_channel_login(channel: str) -> str:
+    """Enforce strict `^[a-z0-9_]{2,32}$` channel login (blocks IRC command/CRLF injection)."""
+    clean = (channel or "").strip().lower()
+    if not _CHANNEL_LOGIN_RE.fullmatch(clean):
+        raise ValueError(f"Invalid channel login {channel!r}: must match ^[a-z0-9_]{{2,32}}$")
+    return clean
+
+
 _IRC_PRIVMSG_RE = re.compile(r":([^!\s]+)![^\s]+ PRIVMSG #[^\s]+ :(.+)$")
 
 
@@ -308,7 +320,7 @@ def resolve_live_hls_url(platform: str, channel: str) -> tuple[str | None, int |
             )
             if res.returncode == 0 and res.stdout.strip().startswith("http"):
                 return res.stdout.strip().splitlines()[0], None
-        ytdlp = shutil.which("yt-dlp") or str(Path(RUNS_DIR.parent) / ".venv" / "Scripts" / "yt-dlp.exe")
+        ytdlp = resolve_binary_str("yt-dlp")
         res = subprocess.run(
             [ytdlp, "--no-warnings", "-f", "best[height<=1080]/best", "-g", "--", url],
             capture_output=True,
@@ -325,9 +337,13 @@ async def _poll_hls_ring_buffer(
     master_url: str,
     ring: HLSRingBuffer,
     stop_event: asyncio.Event,
+    *,
+    platform: str = "",
+    channel: str = "",
 ) -> None:
-    """Background asyncio task polling live HLS media segments into `HLSRingBuffer`."""
+    """Background asyncio task polling live HLS media segments into `HLSRingBuffer` with token auto-refresh."""
     media_url = master_url
+    consecutive_expired = 0
     try:
         r0 = await asyncio.to_thread(curl_requests.get, master_url, impersonate="chrome", timeout=10)
         if r0.status_code == 200:
@@ -339,6 +355,7 @@ async def _poll_hls_ring_buffer(
         try:
             resp = await asyncio.to_thread(curl_requests.get, media_url, impersonate="chrome", timeout=10)
             if resp.status_code == 200:
+                consecutive_expired = 0
                 lines = [ln.strip() for ln in resp.text.splitlines() if ln.strip()]
                 seg_dur = 2.0
                 for ln in lines:
@@ -353,6 +370,19 @@ async def _poll_hls_ring_buffer(
                             sr = await asyncio.to_thread(curl_requests.get, seg_url, impersonate="chrome", timeout=10)
                             if sr.status_code == 200 and sr.content:
                                 ring.append(seg_url, seg_dur, sr.content)
+                            elif sr.status_code in {403, 404, 410}:
+                                consecutive_expired += 1
+            elif resp.status_code in {403, 404, 410}:
+                consecutive_expired += 1
+
+            if consecutive_expired >= 3 and platform and channel:
+                consecutive_expired = 0
+                refreshed_master, _ = await asyncio.to_thread(resolve_live_hls_url, platform, channel)
+                if refreshed_master:
+                    media_url = refreshed_master
+                    r_new = await asyncio.to_thread(curl_requests.get, refreshed_master, impersonate="chrome", timeout=10)
+                    if r_new.status_code == 200:
+                        media_url = _select_best_hls_variant(refreshed_master, r_new.text)
         except Exception:
             pass
         try:
@@ -368,6 +398,7 @@ async def _listen_twitch_irc(
     stop_event: asyncio.Event,
 ) -> None:
     """Connect anonymously (`justinfan`) to Twitch IRC WebSocket and feed `ChatWaveDetector`."""
+    safe_channel = validate_channel_login(channel)
     nick = f"justinfan{random.randint(10000, 99999)}"
     uri = "wss://irc-ws.chat.twitch.tv:443"
     while not stop_event.is_set():
@@ -375,7 +406,7 @@ async def _listen_twitch_irc(
             async with websockets.connect(uri, ping_interval=20, ping_timeout=10, open_timeout=12) as ws:
                 await ws.send("PASS SCHMOOPIIE")
                 await ws.send(f"NICK {nick}")
-                await ws.send(f"JOIN #{channel.lower()}")
+                await ws.send(f"JOIN #{safe_channel}")
                 while not stop_event.is_set():
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
@@ -515,8 +546,10 @@ def _materialize_sniper_run(
             state = _render_and_verify(run_dir, state)
         result["rendered_clips"] = state.rendered_clips
         if state.rendered_clips:
+            safe_key = html.escape(trig.channel_key, quote=True)
+            safe_rid = html.escape(run_id, quote=True)
             send_telegram_message(
-                f"<b>Live Sniper Captured</b> {trig.channel_key}\nrun_id=<code>{run_id}</code> clips={len(state.rendered_clips)}"
+                f"<b>Live Sniper Captured</b> {safe_key}\nrun_id=<code>{safe_rid}</code> clips={len(state.rendered_clips)}"
             )
     return result
 
@@ -536,7 +569,8 @@ async def run_live_sniper(
         plat, _, ch = raw.partition(":")
         if not ch:
             plat, ch = "twitch", plat
-        parsed.append((plat.strip().lower(), ch.strip().lower()))
+        safe_ch = validate_channel_login(ch)
+        parsed.append((plat.strip().lower(), safe_ch))
 
     stop_event = asyncio.Event()
     trigger_q: asyncio.Queue[SniperTrigger] = asyncio.Queue()
@@ -557,7 +591,7 @@ async def run_live_sniper(
             hls_url, cid = await asyncio.to_thread(resolve_live_hls_url, plat, ch)
             if hls_url:
                 hls_status[key] = "streaming_hls"
-                tasks.append(asyncio.create_task(_poll_hls_ring_buffer(hls_url, ring, stop_event)))
+                tasks.append(asyncio.create_task(_poll_hls_ring_buffer(hls_url, ring, stop_event, platform=plat, channel=ch)))
             else:
                 hls_status[key] = "offline_or_no_hls"
         else:

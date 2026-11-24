@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -14,20 +13,10 @@ from dotenv import load_dotenv
 from src.db import insert_telemetry
 from src.llm_router import reset_cached_prefix
 from src.miner import PROJECT_ROOT, fetch_kick_gta6_clips, load_whitelist
+from src.runtime_paths import parse_iso_duration_sec as _parse_iso_duration_sec
 
 GOLDEN_REFS_PATH = PROJECT_ROOT / "context" / "golden_references.json"
 LIVING_BRIEF_PATH = PROJECT_ROOT / "context" / "gta6_living_brief.md"
-_ISO_DUR_RE = re.compile(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?")
-
-
-def _parse_iso_duration_sec(iso: str) -> float:
-    m = _ISO_DUR_RE.match(iso or "")
-    if not m:
-        return 0.0
-    h = int(m.group(1) or 0)
-    mins = int(m.group(2) or 0)
-    s = int(m.group(3) or 0)
-    return float(h * 3600 + mins * 60 + s)
 
 
 def _infer_hook_style(title: str) -> tuple[str, str]:

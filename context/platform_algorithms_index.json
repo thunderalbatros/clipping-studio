@@ -22,7 +22,8 @@
       "monetization_compliance": {
         "bounties_channel_voice_mode": "none",
         "owned_ypp_channel_voice_mode": "human_batch",
-        "inauthentic_content_rule_july_2025": "YPP evaluates entire channel; mass-produced templated clips or raw streamer clips with only captions/TTS fail Reused/Inauthentic Content even with creator permission."
+        "inauthentic_content_rule_july_2025": "YPP evaluates entire channel; mass-produced templated clips or raw streamer clips with only captions/TTS fail Reused/Inauthentic Content even with creator permission.",
+        "oct_2026_anti_clipper_update": "Oct 1 2026 enforcement drops reach -40% to -80% on untransformed stream cuts; requires motivated multi-layer editing, non-duplicate cover!=overlay packaging, negative-feedback hygiene (Jun 25 2026), and verified Engaged Views (Aug 24 2026)."
       },
       "cover_spec": {
         "canvas_px": [1080, 1920],
@@ -153,7 +154,9 @@
     "paddy_galloway_ccn": "Satisfy Core (lore), Casual (1-2s context), and New (zero-context visual hook); <=3 cover elements + complementary title/cover curiosity gap.",
     "jenny_hoyos_shorts": "Frame-1 shock -> <3s clear stakes -> cut cleanly on climax resolution (avoid 20-25% final-second cliff).",
     "kallaway_triple_hook": "Align Visual Hook (mute-readable) + Audio Hook (context lean) + Text Hook (pattern interrupt).",
-    "derral_eves_youtube_formula": "Algorithm follows audience behavior (CTR x Retention); diagnose drop-off timestamps systematically."
+    "derral_eves_youtube_formula": "Algorithm follows audience behavior (CTR x Retention); diagnose drop-off timestamps systematically.",
+    "berger_contagious_stepps": "Social Currency + Triggers + High-Arousal Emotion (awe, laughter, shock) + Public visibility + Practical Value + Stories, paired with a mid-clip unexpected valence shift.",
+    "q4_2026_platform_and_anti_uniformity_gates": "Whop Fall 2026 Bot Score (0-100) + pool velocity (20-80% burn); TikTok US Oracle follower-first seed + Nov 20 2026 Likeness/C2PA enforcement (keep voice_mode=none on bounties); Meta Andromeda Oct 28 2026 visual-template dedupe; NEVER duplicate cover_headline == overlay callout_text, apply voice clarity pre-amix, and duck SFX/riser via sidechain."
   },
   "strict_ban_red_lines": [
     "NEVER use sock-puppet accounts, engagement pods (0 ranking impact in X scoring.rs), Playwright comment bots, or anti-detect browsers",

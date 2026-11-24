@@ -20,13 +20,13 @@ import io
 import json
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import wave
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 import onnxruntime as ort
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
@@ -34,10 +34,14 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 from src.miner import PROJECT_ROOT, probe_video_stream
 from src.rag_engine import query_rag
 from src.resource_guard import onnx_threads
+from src.runtime_paths import (
+    BUNDLED_FONT_PATH,
+    find_headless_browser,
+    headless_browser_flags,
+)
 from src.schemas import UNIVERSAL_SAFE_BOX_9_16
 from src.speaker_guard import detect_faces_ultraface
 
-BUNDLED_FONT_PATH = PROJECT_ROOT / "assets" / "fonts" / "Montserrat-Black.ttf"
 REMBG_HOME = PROJECT_ROOT / "models" / "rembg"
 ALLOWED_MATTING_MODEL = "birefnet-general-lite"
 FORBIDDEN_MATTING_MODELS = frozenset({"bria-rmbg", "bria", "sam", "matanyone"})
@@ -88,8 +92,14 @@ _COMPLEMENTARY_FALLBACK_HOOKS = (
 
 
 def _content_words(text: str) -> set[str]:
-    tokens = re.findall(r"[a-z0-9]+", text.lower())
+    clean = re.sub(r"['\u2019`]", "", (text or "").lower())
+    tokens = re.findall(r"[a-z0-9]+", clean)
     return {t for t in tokens if len(t) >= 3 and t not in _HEADLINE_STOPWORDS}
+
+
+def _norm_alnum(text: str) -> str:
+    clean = re.sub(r"['\u2019`]", "", (text or "").lower())
+    return " ".join(re.findall(r"[a-z0-9]+", clean))
 
 
 def ensure_complementary_cover_headline(
@@ -97,21 +107,32 @@ def ensure_complementary_cover_headline(
     title: str = "",
     fallback_headlines: list[str] | None = None,
     max_words: int = 4,
+    forbidden_texts: list[str] | None = None,
 ) -> tuple[str, list[str]]:
-    """Enforce Curiosity-Gap cover copy (2-4 words) with ZERO literal content-word overlap with `title`."""
+    """Enforce Curiosity-Gap cover copy (2-4 words) with ZERO overlap vs `title` and NEVER duplicating `forbidden_texts` (overlay)."""
     clean_primary = " ".join(headline.strip().split())
     title_words = _content_words(title)
+    forb_norms = {_norm_alnum(t) for t in (forbidden_texts or []) if _norm_alnum(t)}
+    forb_words: set[str] = set()
+    for t in forbidden_texts or []:
+        forb_words |= _content_words(t)
 
     def _clean_short(cand: str) -> str:
         ws = [w for w in cand.strip().split() if w][:max_words]
         return " ".join(ws).upper()
 
-    if not title_words:
-        chosen = _clean_short(clean_primary) or "WAIT FOR IT"
-        return chosen, []
+    def _is_duplicate_of_overlay(cand_short: str) -> bool:
+        n = _norm_alnum(cand_short)
+        if not n:
+            return True
+        if n in forb_norms:
+            return True
+        cw = _content_words(cand_short)
+        # Reject if all content words of candidate match the interior callout overlay
+        return bool(cw and forb_words and cw.issubset(forb_words))
 
     primary_short = _clean_short(clean_primary)
-    if primary_short and not (_content_words(primary_short) & title_words):
+    if primary_short and not _is_duplicate_of_overlay(primary_short) and not (_content_words(primary_short) & title_words):
         return primary_short, []
 
     candidates: list[str] = []
@@ -121,14 +142,17 @@ def ensure_complementary_cover_headline(
 
     for cand in candidates:
         short = _clean_short(cand)
-        if not short:
+        if not short or len(short.split()) < 2:
             continue
-        if len(short.split()) < 2:
+        if _is_duplicate_of_overlay(short):
             continue
         if not (_content_words(short) & title_words):
             return short, []
 
-    return "WAIT FOR IT", []
+    for fb in _COMPLEMENTARY_FALLBACK_HOOKS:
+        if not _is_duplicate_of_overlay(fb):
+            return fb, []
+    return "INSTANT KARMA", []
 
 
 def _query_design_ctr_rag(query: str, top_k: int = 3) -> list[dict[str, Any]]:
@@ -152,6 +176,7 @@ def select_peak_cover_frame_from_dir(
     out_clean_jpg: Path,
     video_for_rms: Path | None = None,
     duration_sec: float = 0.0,
+    rank_offset: int = 0,
 ) -> dict[str, Any]:
     """Score pre-`libass` 9:16 frames extracted directly from `[base]` (ZERO burned captions)."""
     out_clean_jpg.parent.mkdir(parents=True, exist_ok=True)
@@ -202,7 +227,9 @@ def select_peak_cover_frame_from_dir(
     for c in candidates:
         c["total_score"] = round(0.45 * (c["sharpness"] / max_sharp) + 0.35 * c["face_score"] + 0.20 * c["rms_norm"], 4)
 
-    best_c = max(candidates, key=lambda c: c["total_score"])
+    ordered = sorted(candidates, key=lambda c: c["total_score"], reverse=True)
+    pick_idx = min(max(0, int(rank_offset)), len(ordered) - 1)
+    best_c = ordered[pick_idx]
     with Image.open(best_c["path"]) as _im:
         best_img = _im.convert("RGB")
     best_img.save(out_clean_jpg, format="JPEG", quality=94, subsampling=0)
@@ -215,6 +242,7 @@ def select_peak_cover_frame_from_dir(
         "face_score": round(float(best_c["face_score"]), 3),
         "rms_norm": round(float(best_c["rms_norm"]), 3),
         "total_score": best_c["total_score"],
+        "rank_offset": pick_idx,
         "pre_libass": True,
     }
 
@@ -226,25 +254,6 @@ def _get_font_base64() -> str:
             raise FileNotFoundError(f"Bundled Montserrat-Black.ttf missing at {BUNDLED_FONT_PATH}")
         _FONT_B64_CACHE = base64.b64encode(BUNDLED_FONT_PATH.read_bytes()).decode("ascii")
     return _FONT_B64_CACHE
-
-
-def find_headless_browser() -> Path | None:
-    """Locate Chrome or Edge binary already installed on Windows (0 MB extra downloads)."""
-    candidates = [
-        Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
-        Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
-        Path(os.getenv("LOCALAPPDATA", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
-        Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
-        Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
-    ]
-    for p in candidates:
-        if p.is_file():
-            return p
-    for name in ("chrome", "google-chrome", "msedge", "chromium"):
-        found = shutil.which(name)
-        if found:
-            return Path(found)
-    return None
 
 
 def compute_apca_lc(fg_rgb: tuple[int, int, int], bg_rgb: tuple[int, int, int]) -> float:
@@ -528,6 +537,31 @@ def _auto_detect_portrait_roi(img_rgb: Image.Image) -> tuple[int, int, int, int]
     return (rx1, ry1, rx2, ry2)
 
 
+def clean_alpha_floating_islands(rgba: Image.Image, min_area_ratio: float = 0.008) -> Image.Image:
+    """Remove disconnected floating background islands/halos from an RGBA cutout via `cv2.connectedComponentsWithStats`."""
+    arr = np.asarray(rgba.convert("RGBA")).copy()
+    alpha = arr[..., 3]
+    fg_bin = (alpha > 32).astype(np.uint8)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(fg_bin, connectivity=8)
+    if num_labels <= 2:
+        return Image.fromarray(arr, mode="RGBA")
+
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    largest_area = int(areas.max()) if len(areas) else 0
+    if largest_area <= 0:
+        return Image.fromarray(arr, mode="RGBA")
+
+    total_px = alpha.shape[0] * alpha.shape[1]
+    min_keep = max(int(total_px * min_area_ratio), int(largest_area * 0.14))
+    keep_mask = np.zeros_like(fg_bin, dtype=bool)
+    for lbl in range(1, num_labels):
+        if int(stats[lbl, cv2.CC_STAT_AREA]) >= min_keep:
+            keep_mask |= labels == lbl
+
+    arr[..., 3] = np.where(keep_mask, alpha, 0).astype(np.uint8)
+    return Image.fromarray(arr, mode="RGBA")
+
+
 def extract_subject_cutout(
     img_rgb: Image.Image,
     webcam_box_px: tuple[int, int, int, int] | None = None,
@@ -553,7 +587,7 @@ def extract_subject_cutout(
 
     def _run_matting(pil_img: Image.Image) -> Image.Image | None:
         if rembg_fn is not None:
-            return rembg_fn(pil_img).convert("RGBA")
+            return clean_alpha_floating_islands(rembg_fn(pil_img).convert("RGBA"))
         import gc
 
         from rembg import remove
@@ -563,10 +597,12 @@ def extract_subject_cutout(
             sess = _get_rembg_session(low)
             out = remove(pil_img, session=sess)
             if isinstance(out, bytes):
-                return Image.open(io.BytesIO(out)).convert("RGBA")
-            if isinstance(out, Image.Image):
-                return out.convert("RGBA")
-            return Image.fromarray(out).convert("RGBA")
+                raw_rgba = Image.open(io.BytesIO(out)).convert("RGBA")
+            elif isinstance(out, Image.Image):
+                raw_rgba = out.convert("RGBA")
+            else:
+                raw_rgba = Image.fromarray(out).convert("RGBA")
+            return clean_alpha_floating_islands(raw_rgba)
         except Exception:
             return None
 
@@ -847,13 +883,7 @@ def _render_html_to_image(html_doc: str, width: int, height: int) -> tuple[Image
         def _capture(win_w: int, win_h: int) -> Image.Image | None:
             cmd = [
                 str(browser),
-                "--headless=new",
-                "--disable-gpu",
-                "--no-sandbox",
-                "--disable-software-rasterizer",
-                "--disable-extensions",
-                "--force-device-scale-factor=1",
-                "--hide-scrollbars",
+                *headless_browser_flags(),
                 f"--window-size={win_w},{win_h}",
                 "--virtual-time-budget=2000",
                 f"--screenshot={out_png}",
@@ -960,6 +990,7 @@ def render_editorial_cover_9_16(
     title: str = "",
     fallback_headlines: list[str] | None = None,
     cover_timestamp_ms_override: int | None = None,
+    forbidden_texts: list[str] | None = None,
 ) -> dict[str, Any]:
     """Render Method-C Layer 2 `1080x1920` editorial cover with Universal 4-Network Safe Box, APCA >= 75, and QA artifacts."""
     if not BUNDLED_FONT_PATH.is_file():
@@ -973,7 +1004,11 @@ def render_editorial_cover_9_16(
 
     rag_hits = _query_design_ctr_rag(f"9:16 cover APCA safe box curiosity gap {headline} {badge_text}", top_k=3)
     final_headline, overlap_words = ensure_complementary_cover_headline(
-        headline, title=title, fallback_headlines=fallback_headlines, max_words=4
+        headline,
+        title=title,
+        fallback_headlines=fallback_headlines,
+        max_words=4,
+        forbidden_texts=forbidden_texts,
     )
 
     # Fit exact 1080x1920 (center-crop preserving aspect ratio, zero distortion)

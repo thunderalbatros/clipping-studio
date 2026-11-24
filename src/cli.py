@@ -35,7 +35,8 @@ from src.miner import (
     validate_run_id,
 )
 from src.renderer import render_ab_hook_variant, render_master_clip
-from src.resource_guard import heavy_local_allowed
+from src.resource_guard import heavy_local_allowed, unload_heavy_models
+from src.runtime_paths import resolve_binary
 from src.schemas import ClipPackaging, RunState, SceneBlueprint
 from src.transcriber import transcribe_run
 from src.trends import run_trends_radar
@@ -50,9 +51,17 @@ def _log_telemetry(run_id: str, event_type: str, event: dict[str, object]) -> No
     insert_telemetry(run_id, event_type, event)
 
 
-def _render_and_verify(run_dir: Path, state: RunState, ab_variants: int = 1) -> RunState:
+def _render_and_verify(
+    run_dir: Path,
+    state: RunState,
+    ab_variants: int = 1,
+    run_vlm_qa: bool = True,
+) -> RunState:
+    from evals.visual_qa import VisualQAInputs, evaluate_visual_qa
     from src.analytics import emit_hitl_kit_5_networks
+    from src.callout import OVERLAY_DEFAULT_Y
     from src.design_engine import render_editorial_cover_9_16
+    from src.notifier import send_clip_ready_alert
 
     compute_profile = os.getenv("COMPUTE_PROFILE", "local_hp").strip() or "local_hp"
     cand_map = {c.slice_id: c for c in state.candidates}
@@ -66,6 +75,10 @@ def _render_and_verify(run_dir: Path, state: RunState, ab_variants: int = 1) -> 
         tr = tr_map[plan.slice_id]
         out_mp4 = run_dir / f"{plan.clip_id}_master_9_16.mp4"
         cover_clean_pre_ass = run_dir / f"{plan.clip_id}_cover_clean.jpg"
+        cover_9_16 = run_dir / f"{plan.clip_id}_cover_9_16.jpg"
+        qa_dir = run_dir / f"{plan.clip_id}_qa_frames"
+        expected_fps: float | None = 60.0 if (cand.source_fps <= 0 or cand.source_fps >= 48.0) else 30.0
+
         bp_obj: SceneBlueprint | None = None
         if plan.scene_blueprint_key:
             cached_bp = get_scene_blueprint(plan.scene_blueprint_key)
@@ -74,59 +87,117 @@ def _render_and_verify(run_dir: Path, state: RunState, ab_variants: int = 1) -> 
                     bp_obj = SceneBlueprint.model_validate_json(str(cached_bp["blueprint_json"]))
                 except Exception:
                     bp_obj = None
-        render_master_clip(
-            Path(cand.slice_video_path),
-            plan,
-            tr,
-            out_mp4,
-            compute_profile=compute_profile,
-            clean_cover_out=cover_clean_pre_ass,
-            enforce_speaker_guard=True,
-            scene_blueprint=bp_obj,
-        )
 
-        qa_dir = run_dir / f"{plan.clip_id}_qa_frames"
-        verdict = evaluate_video(out_mp4, qa_dir=qa_dir)
-        verdict["layout_audit"] = {
-            "layout_mode": plan.layout_mode,
-            "webcam_upscale_factor": plan.webcam_upscale_factor,
-            "no_webcam_gameplay_overlap": plan.no_webcam_gameplay_overlap,
-            "gameplay_crop_px": plan.gameplay_crop_px,
-            "source_width": cand.source_width,
-            "source_height": cand.source_height,
-            "source_fps": cand.source_fps,
-        }
-        (run_dir / f"{plan.clip_id}_media_check.json").write_text(json.dumps(verdict, indent=2), encoding="utf-8")
+        pkg = generate_clip_packaging(plan, tr, state.streamer_id)
+        overlay_text = plan.freeze_frame.callout_text if plan.freeze_frame is not None else ""
+        forbidden_cover_texts = [overlay_text] if overlay_text else None
+
+        cover_rank_offset = 0
+        callout_y_override: int | None = None
+        qa_report: dict[str, object] = {}
+        verdict: dict[str, object] = {}
+
+        # Post-render autonomous Visual QA gate with max_retries=1 parametric adjustment
+        for attempt in range(2):
+            render_master_clip(
+                Path(cand.slice_video_path),
+                plan,
+                tr,
+                out_mp4,
+                compute_profile=compute_profile,
+                clean_cover_out=cover_clean_pre_ass,
+                enforce_speaker_guard=(attempt == 0),
+                scene_blueprint=bp_obj,
+                cover_rank_offset=cover_rank_offset,
+                callout_y_override=callout_y_override,
+            )
+
+            verdict = evaluate_video(out_mp4, qa_dir=qa_dir, expected_fps=expected_fps)
+            verdict["layout_audit"] = {
+                "layout_mode": plan.layout_mode,
+                "webcam_upscale_factor": plan.webcam_upscale_factor,
+                "no_webcam_gameplay_overlap": plan.no_webcam_gameplay_overlap,
+                "gameplay_crop_px": plan.gameplay_crop_px,
+                "source_width": cand.source_width,
+                "source_height": cand.source_height,
+                "source_fps": cand.source_fps,
+            }
+            (run_dir / f"{plan.clip_id}_media_check.json").write_text(json.dumps(verdict, indent=2), encoding="utf-8")
+
+            if out_mp4.is_file():
+                try:
+                    cover_headline = pkg.suggested_on_screen_hook or plan.hook_headline
+                    fallbacks = list(pkg.ab_hook_variants)
+                    # NEVER append overlay_text to fallbacks; pass forbidden_texts so cover != overlay!
+                    cover_source = cover_clean_pre_ass if cover_clean_pre_ass.is_file() else Path(cand.slice_video_path)
+                    cov_meta = render_editorial_cover_9_16(
+                        video_or_img=cover_source,
+                        headline=cover_headline,
+                        out_jpg=cover_9_16,
+                        clean_cover_jpg=cover_clean_pre_ass,
+                        title=pkg.shorts_title,
+                        fallback_headlines=fallbacks,
+                        forbidden_texts=forbidden_cover_texts,
+                    )
+                    pkg.suggested_on_screen_hook = str(cov_meta.get("cover_headline_used") or pkg.suggested_on_screen_hook)
+                    pkg.cover_timestamp_ms = int(cov_meta.get("cover_timestamp_ms") or 0)
+                    pkg.cover_clean_path = str(cov_meta.get("cover_clean_path") or "")
+                    pkg.cover_9_16_path = str(cov_meta.get("cover_path") or "")
+                except Exception as exc:
+                    print(f"[COVER_WARN] {plan.clip_id}: cover generation skipped ({exc})")
+
+            qa_report = evaluate_visual_qa(
+                VisualQAInputs(
+                    clip_id=plan.clip_id,
+                    video_path=out_mp4,
+                    cover_path=cover_9_16 if cover_9_16.is_file() else None,
+                    qa_dir=qa_dir,
+                    expected_fps=expected_fps,
+                    shorts_title=pkg.shorts_title,
+                    cover_headline=pkg.suggested_on_screen_hook,
+                    overlay_callout_text=overlay_text,
+                    run_vlm=run_vlm_qa,
+                ),
+                out_report_json=run_dir / f"{plan.clip_id}_visual_qa.json",
+            )
+            insert_telemetry(
+                state.run_id,
+                "visual_qa_verdict",
+                {
+                    "clip_id": plan.clip_id,
+                    "attempt": attempt,
+                    "passed": qa_report.get("passed"),
+                    "status": qa_report.get("status"),
+                    "recommended_fix": qa_report.get("recommended_fix"),
+                    "scores": qa_report.get("scores"),
+                },
+            )
+            if qa_report.get("passed"):
+                break
+            if attempt == 0:
+                rec_fix = str(qa_report.get("recommended_fix") or "shift_cover_frame")
+                print(f"[VISUAL_QA_RETRY] {plan.clip_id}: attempt=0 failed (fix={rec_fix}); applying parametric adjustment...")
+                if rec_fix == "shift_cover_frame":
+                    cover_rank_offset = 1
+                elif rec_fix == "alternate_cover_hook":
+                    alt_cands = [h for h in pkg.ab_hook_variants if h.strip().upper() != pkg.suggested_on_screen_hook.strip().upper()]
+                    pkg.suggested_on_screen_hook = alt_cands[0] if alt_cands else "INSTANT KARMA"
+                elif rec_fix == "shift_overlay_y":
+                    callout_y_override = OVERLAY_DEFAULT_Y + 48
+                else:
+                    cover_rank_offset = 1
+
         rendered.append(str(out_mp4))
+        checks_dict = verdict.get("checks") if isinstance(verdict.get("checks"), dict) else {}
+        loud_dict = checks_dict.get("loudness_ebur128") if isinstance(checks_dict, dict) else {}
+        lufs = float((loud_dict or {}).get("integrated_lufs") or 0.0)
+        dbtp = float((loud_dict or {}).get("true_peak_dbtp") or 0.0)
 
-        lufs = float(verdict["checks"]["loudness_ebur128"].get("integrated_lufs") or 0.0)
-        dbtp = float(verdict["checks"]["loudness_ebur128"].get("true_peak_dbtp") or 0.0)
+        qa_passed = bool(qa_report.get("passed")) and bool(verdict.get("passed"))
+        clip_status = "READY_HITL" if qa_passed else "NEEDS_VISUAL_FIX"
         pkg_json_str = ""
-        if verdict["passed"]:
-            pkg = generate_clip_packaging(plan, tr, state.streamer_id)
-            try:
-                cover_9_16 = run_dir / f"{plan.clip_id}_cover_9_16.jpg"
-                cover_headline = pkg.suggested_on_screen_hook or plan.hook_headline
-                fallbacks = list(pkg.ab_hook_variants)
-                if plan.freeze_frame is not None:
-                    fallbacks.append(plan.freeze_frame.callout_text)
-                # ALWAYS pass pre-libass clean 9:16 frame so ZERO burned captions leak into cover_9_16.jpg
-                cover_source = cover_clean_pre_ass if cover_clean_pre_ass.is_file() else Path(cand.slice_video_path)
-                cov_meta = render_editorial_cover_9_16(
-                    video_or_img=cover_source,
-                    headline=cover_headline,
-                    out_jpg=cover_9_16,
-                    clean_cover_jpg=cover_clean_pre_ass,
-                    title=pkg.shorts_title,
-                    fallback_headlines=fallbacks,
-                )
-                pkg.suggested_on_screen_hook = str(cov_meta.get("cover_headline_used") or pkg.suggested_on_screen_hook)
-                pkg.cover_timestamp_ms = int(cov_meta.get("cover_timestamp_ms") or 0)
-                pkg.cover_clean_path = str(cov_meta.get("cover_clean_path") or "")
-                pkg.cover_9_16_path = str(cov_meta.get("cover_path") or "")
-            except Exception as exc:
-                print(f"[COVER_WARN] {plan.clip_id}: cover generation skipped ({exc})")
 
+        if qa_passed:
             if ab_variants >= 2:
                 alt_hook = (pkg.ab_hook_variants[0] if pkg.ab_hook_variants else pkg.suggested_on_screen_hook) or plan.hook_headline
                 var_b_mp4 = run_dir / f"{plan.clip_id}_variant_b_9_16.mp4"
@@ -144,6 +215,9 @@ def _render_and_verify(run_dir: Path, state: RunState, ab_variants: int = 1) -> 
                 f"[PACKAGING] {plan.clip_id}: title={pkg.shorts_title!r} cover_hook={pkg.suggested_on_screen_hook!r} "
                 f"tags={pkg.shorts_hashtags} cover_ts_ms={pkg.cover_timestamp_ms} kit={hitl_kit['kit_md_path']}"
             )
+        else:
+            pkg_json_str = pkg.model_dump_json(indent=2)
+            (run_dir / f"{plan.clip_id}_packaging.json").write_text(pkg_json_str, encoding="utf-8")
 
         cr = critic_map.get(plan.clip_id)
         upsert_clip(
@@ -159,17 +233,29 @@ def _render_and_verify(run_dir: Path, state: RunState, ab_variants: int = 1) -> 
             no_webcam_gameplay_overlap=plan.no_webcam_gameplay_overlap,
             matched_lore_entity=plan.matched_lore_entity or "",
             critic_overall=cr.overall if cr else 0.0,
-            media_check_passed=bool(verdict["passed"]),
+            media_check_passed=qa_passed,
             lufs=lufs,
             dbtp=dbtp,
             output_mp4=str(out_mp4),
             packaging_json=pkg_json_str,
+            status=clip_status,
         )
         print(
-            f"[MEDIA_CHECK] {out_mp4.name}: passed={verdict['passed']} "
+            f"[VISUAL_QA_GATE] {out_mp4.name}: status={clip_status} qa_passed={qa_passed} "
             f"lufs={lufs} dbtp={dbtp} upscale={plan.webcam_upscale_factor}x overlap_free={plan.no_webcam_gameplay_overlap}"
         )
 
+        # Send HITL Telegram alert EXCLUSIVELY when clip passes autonomous Visual QA (`READY_HITL`)!
+        if clip_status == "READY_HITL":
+            send_clip_ready_alert(
+                run_id=state.run_id,
+                clip_id=plan.clip_id,
+                mp4_path=out_mp4,
+                packaging=pkg.model_dump(),
+                critic_overall=cr.overall if cr else 0.0,
+            )
+
+    unload_heavy_models()
     state.rendered_clips = rendered
     state.packaging = packages
     state.stage = "reviewed" if rendered else state.stage
@@ -182,6 +268,11 @@ def _render_and_verify(run_dir: Path, state: RunState, ab_variants: int = 1) -> 
 
 def cmd_run(args: argparse.Namespace) -> int:
     init_db()
+    allowed, reason, _ = heavy_local_allowed()
+    if not allowed:
+        print(f"[RESOURCE_GUARD] Blocked local run: {reason}")
+        return 1
+
     t0 = time.perf_counter()
     run_id = args.run_id or datetime.now(UTC).strftime("run_%Y%m%d_%H%M%S")
     run_dir = validate_run_id(run_id, RUNS_DIR)
@@ -213,6 +304,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     if cur_stage < 2:
         state = transcribe_run(run_dir, audio_policy=args.audio_policy)
+        unload_heavy_models()
 
     if cur_stage < 3:
         state = curate_run(
@@ -221,9 +313,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             audio_policy=args.audio_policy,
             scene_research=bool(getattr(args, "scene_research", False)),
             game=str(getattr(args, "game", "GTA VI") or "GTA VI"),
+            max_clips=args.top_k,
         )
+        unload_heavy_models()
 
-    if state.edit_plans:
+    if cur_stage >= 5 and not args.fresh:
+        print(f"[CLI] run_id={run_id} already at stage='reviewed'; skipping re-render (pass --fresh to force).")
+    elif state.edit_plans:
         state = _render_and_verify(run_dir, state, ab_variants=args.ab_variants)
     else:
         print(f"[CLI] run_id={run_id} finished without approved clips (check slice_audits/critic_results).")
@@ -250,9 +346,15 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_curate(args: argparse.Namespace) -> int:
     init_db()
+    allowed, reason, _ = heavy_local_allowed()
+    if not allowed:
+        print(f"[RESOURCE_GUARD] Blocked local curate: {reason}")
+        return 1
+
     run_dir = validate_run_id(args.run_id, RUNS_DIR)
     if args.retranscribe:
         transcribe_run(run_dir, audio_policy=args.audio_policy)
+        unload_heavy_models()
     state = curate_run(
         run_dir,
         brief=args.brief,
@@ -260,6 +362,7 @@ def cmd_curate(args: argparse.Namespace) -> int:
         scene_research=bool(getattr(args, "scene_research", False)),
         game=str(getattr(args, "game", "GTA VI") or "GTA VI"),
     )
+    unload_heavy_models()
     if args.render and state.edit_plans:
         state = _render_and_verify(run_dir, state, ab_variants=args.ab_variants)
     print(f"[CLI_CURATE] run_id={args.run_id} audits={len(state.slice_audits)} plans={len(state.edit_plans)} audio_policy={state.audio_policy}")
@@ -554,8 +657,6 @@ def cmd_creators(args: argparse.Namespace) -> int:
 
 def cmd_doctor(_args: argparse.Namespace) -> int:
     """Audit environment, hardware headroom, assets, ONNX models, SQLite WAL, and secret presence (zero values)."""
-    import shutil
-
     import onnxruntime as ort
     from dotenv import load_dotenv
 
@@ -588,15 +689,14 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     deno_found = deno_exe is not None
     browser_bin = find_headless_browser()
     bins = {
-        "ffmpeg": bool(shutil.which("ffmpeg")),
-        "ffprobe": bool(shutil.which("ffprobe")),
+        "ffmpeg": resolve_binary("ffmpeg") is not None,
+        "ffprobe": resolve_binary("ffprobe") is not None,
         "deno": deno_found,
         "deno_path": str(deno_exe) if deno_exe is not None else None,
-        "yt-dlp": (PROJECT_ROOT / ".venv" / "Scripts" / "yt-dlp.exe").exists() or bool(shutil.which("yt-dlp")),
-        "TwitchDownloaderCLI": (PROJECT_ROOT / ".venv" / "Scripts" / "TwitchDownloaderCLI.exe").exists()
-        or bool(shutil.which("TwitchDownloaderCLI")),
+        "yt-dlp": resolve_binary("yt-dlp") is not None,
+        "TwitchDownloaderCLI": resolve_binary("TwitchDownloaderCLI") is not None,
         "auto-editor": find_auto_editor_executable() is not None,
-        "rtk": bool(shutil.which("rtk")),
+        "rtk": resolve_binary("rtk") is not None,
         "headless_browser": browser_bin.name if browser_bin else None,
     }
     birefnet_files = list(REMBG_HOME.rglob("*birefnet-general-lite*.onnx")) if REMBG_HOME.exists() else []

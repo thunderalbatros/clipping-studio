@@ -1,19 +1,26 @@
-"""Hybrid Local RAG (SQLite FTS5 + sqlite-vec + fastembed + RRF) & Read-Only Federated Omni-RAG v6 Bridge (v3.1).
+"""3-Level Hybrid RAG Engine (`chonkie` + `sqlite-vec 0.1.9` domain metadata + `fastembed` CrossEncoder + Qdrant RO, v3.6-A).
 
 Architecture:
-- Local Layer (`runs/studio.db`): `rag_chunks`, `rag_chunks_fts` (BM25), `rag_chunks_vec` (`float[384]` via sqlite-vec)
-  powered by commercial Apache-2.0 `fastembed` (`BAAI/bge-small-en-v1.5`) respecting `resource_guard.onnx_threads()`.
-- Indexes all 6 knowledge gaps (`shortform_craft`, `design_ctr`, `media_engineering`, `bounties_dmca`,
-  `gta6_streamers`, `episodic_memory`).
-- Federated Read-Only Bridge: optionally queries `web-software-factory/.cache/rag_hot.sqlite` and
-  `rag_library.sqlite` strictly via SQLite URI `?mode=ro&immutable=1` (zero writes, zero `-wal`/`-shm` locks,
-  silent degradation when running on Colab/GCP or if path does not exist).
+- Level 1 (`runs/studio.db`):
+  * Atomic JSON item decomposition (zero 1600-char slice truncation across `viral_style_dna.json`,
+    `platform_algorithms_index.json`, `golden_references.json`, `gta6_lore_index.json`, and `streamer_profiles.json`
+    + automatic fallback profiles from `studio.db#creators`).
+  * Structure-aware Markdown chunking via `chonkie.RecursiveChunker` (`recipe="markdown"` with offline fallback).
+  * Indexes all `7/7` `.agents/skills/*/SKILL.md` files and deduplicates `publish_metrics` telemetry.
+  * Native `sqlite-vec 0.1.9` `domain TEXT` metadata column inside `vec0` for pre-KNN domain filtering.
+- Level 2 (Read-Only Federated Canon):
+  * `rag_hot.sqlite` + `rag_library.sqlite` via strict SQLite URI `?mode=ro&immutable=1` (resolved via
+    `src.runtime_paths.resolve_omni_rag_dir()` — zero personal hardcoded host paths).
+  * Qdrant Cloud strictly read-only (`centinela_knowledge` 384d + `hunthub_omni_rag_v5` 768d) with silent fallback.
+  * Unified cross-source reranking via `fastembed.rerank.cross_encoder.TextCrossEncoder("Xenova/ms-marco-MiniLM-L-6-v2")`
+    with minimum relevance threshold and lore domain guard (registered in `unload_heavy_models()`).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -23,15 +30,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from src.db import DEFAULT_DB_PATH, PROJECT_ROOT, init_db
+from dotenv import load_dotenv
+
+from src.db import DEFAULT_DB_PATH, PROJECT_ROOT, init_db, list_creators
 from src.resource_guard import onnx_threads
+from src.runtime_paths import resolve_omni_rag_dir
 
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 EMBEDDING_DIM = 384
+RERANKER_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
 FASTEMBED_CACHE_DIR = PROJECT_ROOT / "models" / "fastembed_cache"
-DEFAULT_OMNI_RAG_DIR = Path(
-    os.getenv("OMNI_RAG_CACHE_DIR", r"C:\Users\tomas\Desktop\web-software-factory\.cache")
-)
 RRF_K = 60
 
 RAG_DOMAINS = (
@@ -43,15 +51,39 @@ RAG_DOMAINS = (
     "episodic_memory",
 )
 
+SKILL_DOMAIN_MAP: dict[str, str] = {
+    "av-director": "shortform_craft",
+    "marketing-strategist": "shortform_craft",
+    "viral-intelligence-analyst": "shortform_craft",
+    "visual-packaging-designer": "design_ctr",
+    "retention-critic": "design_ctr",
+    "media-engineer": "media_engineering",
+    "bounty-and-distribution-ops": "bounties_dmca",
+}
+
 _EMBEDDER_CACHE: Any = None
+_RERANKER_CACHE: Any = None
+_CHUNKER_CACHE: dict[int, Any] = {}
+_QDRANT_CLIENT_CACHE: Any = None
+
 _FTS_TOKEN_RE = re.compile(r"[0-9A-Za-zÀ-ÖØ-öø-ÿ_]+")
 _HEADING_RE = re.compile(r"^#{1,3}\s+(.+)$")
+_GTA_LORE_GUARD_RE = re.compile(
+    r"\b(gta\s*6|gta\s*vi|gtavi|leonida|vice\s+city|jason\s+duval|lucia\s+caminos|boobie\s+ike|cal\s+hampton|brian\s+heder|mount\s+kalaga|port\s+gellhorn|grassrivers)\b",
+    re.IGNORECASE,
+)
 
 EmbedFn = Callable[[list[str]], list[list[float]]]
+RerankFn = Callable[[str, list[str]], list[float]]
 
 
 def _serialize_f32(vec: list[float]) -> bytes:
     return struct.pack(f"<{len(vec)}f", *(float(x) for x in vec))
+
+
+def _sigmoid(x: float) -> float:
+    x_clamped = max(-30.0, min(30.0, float(x)))
+    return 1.0 / (1.0 + math.exp(-x_clamped))
 
 
 def _load_sqlite_vec(conn: sqlite3.Connection) -> bool:
@@ -80,7 +112,7 @@ def _connect_rag(db_path: Path = DEFAULT_DB_PATH) -> tuple[sqlite3.Connection, b
 
 
 def init_rag_tables(db_path: Path = DEFAULT_DB_PATH) -> dict[str, Any]:
-    """Create `rag_chunks`, `rag_chunks_fts` (BM25), and `rag_chunks_vec` (`float[384]`) in studio.db."""
+    """Create `rag_chunks`, `rag_chunks_fts` (BM25), and `rag_chunks_vec` (`domain TEXT` + `float[384]`)."""
     conn, vec_ok = _connect_rag(db_path)
     try:
         conn.executescript(
@@ -107,10 +139,16 @@ def init_rag_tables(db_path: Path = DEFAULT_DB_PATH) -> dict[str, Any]:
             """
         )
         if vec_ok:
+            row_sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='rag_chunks_vec'"
+            ).fetchone()
+            if row_sql is not None and "domain text" not in str(row_sql[0] or "").lower():
+                conn.execute("DROP TABLE IF EXISTS rag_chunks_vec")
             conn.execute(
                 f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunks_vec USING vec0(
                     chunk_rowid INTEGER PRIMARY KEY,
+                    domain TEXT,
                     embedding float[{EMBEDDING_DIM}]
                 );
                 """
@@ -135,6 +173,20 @@ def _get_fastembed_model() -> Any:
     return _EMBEDDER_CACHE
 
 
+def _get_reranker_model() -> Any:
+    global _RERANKER_CACHE
+    if _RERANKER_CACHE is None:
+        from fastembed.rerank.cross_encoder import TextCrossEncoder
+
+        FASTEMBED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _RERANKER_CACHE = TextCrossEncoder(
+            model_name=RERANKER_MODEL,
+            cache_dir=str(FASTEMBED_CACHE_DIR),
+            threads=onnx_threads(),
+        )
+    return _RERANKER_CACHE
+
+
 def embed_texts(texts: list[str], embed_fn: EmbedFn | None = None) -> list[list[float]]:
     """Compute normalized 384-d embeddings via fastembed (or injected test embedder)."""
     if not texts:
@@ -145,21 +197,60 @@ def embed_texts(texts: list[str], embed_fn: EmbedFn | None = None) -> list[list[
     return [vec.tolist() for vec in model.embed(texts)]
 
 
+def score_cross_encoder(query: str, documents: list[str], rerank_fn: RerankFn | None = None) -> list[float]:
+    """Compute Cross-Encoder relevance logits via `TextCrossEncoder("Xenova/ms-marco-MiniLM-L-6-v2")`."""
+    if not documents:
+        return []
+    if rerank_fn is not None:
+        return [float(s) for s in rerank_fn(query, documents)]
+    reranker = _get_reranker_model()
+    return [float(s) for s in reranker.rerank(query, documents)]
+
+
+def _get_markdown_chunker(max_chars: int = 1400) -> Any:
+    if max_chars not in _CHUNKER_CACHE:
+        from chonkie import RecursiveChunker, RecursiveRules
+
+        os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+        try:
+            _CHUNKER_CACHE[max_chars] = RecursiveChunker.from_recipe(
+                "markdown",
+                lang="en",
+                tokenizer="character",
+                chunk_size=max_chars,
+                min_characters_per_chunk=40,
+            )
+        except Exception:
+            _CHUNKER_CACHE[max_chars] = RecursiveChunker(
+                tokenizer="character",
+                chunk_size=max_chars,
+                rules=RecursiveRules(),
+                min_characters_per_chunk=40,
+            )
+    return _CHUNKER_CACHE[max_chars]
+
+
 def _split_markdown_chunks(
     md_path: Path,
     default_domain: str,
     domain_router: Callable[[str, str], str] | None = None,
-    max_chars: int = 1600,
+    max_chars: int = 1400,
 ) -> list[dict[str, str]]:
-    """Split a Markdown file by headings into right-sized RAG chunks."""
+    """Split a Markdown file by headings and `chonkie.RecursiveChunker` (zero arbitrary truncation)."""
     if not md_path.is_file():
         return []
-    text = md_path.read_text(encoding="utf-8")
+    raw_text = md_path.read_text(encoding="utf-8")
+    # Strip YAML frontmatter from SKILL.md while keeping body intact
+    if raw_text.startswith("---\n"):
+        end_fm = raw_text.find("\n---\n", 4)
+        if end_fm != -1:
+            raw_text = raw_text[end_fm + 5 :]
+
     sections: list[tuple[str, list[str]]] = []
-    cur_h = md_path.stem
+    cur_h = md_path.parent.name if md_path.name == "SKILL.md" else md_path.stem
     cur_lines: list[str] = []
 
-    for ln in text.splitlines():
+    for ln in raw_text.splitlines():
         m = _HEADING_RE.match(ln)
         if m:
             if cur_lines and "".join(cur_lines).strip():
@@ -176,32 +267,19 @@ def _split_markdown_chunks(
     except ValueError:
         rel_src = md_path.name
 
+    stem_id = md_path.parent.name if md_path.name == "SKILL.md" else md_path.stem
+    chunker = _get_markdown_chunker(max_chars=max_chars)
     chunks: list[dict[str, str]] = []
     seq = 0
     for heading, lines in sections:
         body = "\n".join(lines).strip()
-        if len(body) < 40:
+        if len(body) < 35:
             continue
-        # Sub-split very long sections by paragraphs so embeddings stay sharp
-        parts: list[str] = []
         if len(body) <= max_chars:
-            parts.append(body)
+            parts = [body]
         else:
-            buf: list[str] = []
-            buf_len = 0
-            for para in body.split("\n\n"):
-                p = para.strip()
-                if not p:
-                    continue
-                if buf and buf_len + len(p) + 2 > max_chars:
-                    parts.append("\n\n".join(buf))
-                    buf = [p]
-                    buf_len = len(p)
-                else:
-                    buf.append(p)
-                    buf_len += len(p) + 2
-            if buf:
-                parts.append("\n\n".join(buf))
+            ch_objs = list(chunker.chunk(body))
+            parts = [str(c.text).strip() for c in ch_objs if str(c.text).strip()] or [body]
 
         for part_idx, part in enumerate(parts, start=1):
             seq += 1
@@ -209,7 +287,7 @@ def _split_markdown_chunks(
             h_label = heading if len(parts) == 1 else f"{heading} (part {part_idx})"
             chunks.append(
                 {
-                    "chunk_id": f"{dom}:{md_path.stem}:{seq:03d}",
+                    "chunk_id": f"{dom}:{stem_id}:{seq:03d}",
                     "source_path": rel_src,
                     "domain": dom,
                     "heading": h_label,
@@ -228,11 +306,16 @@ def _route_editing_bible_domain(heading: str, body: str) -> str:
     return "shortform_craft"
 
 
-def _collect_json_chunks(project_root: Path) -> list[dict[str, str]]:
-    """Collect structured chunks from context/*.json (streamers, lore, algorithms, style DNA, golden refs)."""
-    chunks: list[dict[str, str]] = []
+def _slugify_id(raw: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", (raw or "").strip().lower()).strip("_")[:40] or "item"
 
-    # 1. Streamer profiles (1 chunk per streamer -> Brecha 5)
+
+def _collect_json_chunks(project_root: Path, db_path: Path = DEFAULT_DB_PATH) -> list[dict[str, str]]:
+    """Decompose `context/*.json` atomically item-by-item with ZERO 1600-char truncation + `studio.db#creators` fallback."""
+    chunks: list[dict[str, str]] = []
+    indexed_streamers: set[str] = set()
+
+    # 1. Streamer profiles (`context/streamer_profiles.json`) + fallback from `studio.db#creators`
     sp_path = project_root / "context" / "streamer_profiles.json"
     if sp_path.is_file():
         try:
@@ -240,6 +323,8 @@ def _collect_json_chunks(project_root: Path) -> list[dict[str, str]]:
             for sid, info in (sp_data.get("streamers") or {}).items():
                 if not isinstance(info, dict):
                     continue
+                norm_sid = str(sid).strip().lower()
+                indexed_streamers.add(norm_sid)
                 lines = [
                     f"Streamer: {info.get('display_name', sid)} (id={sid}, lang={info.get('language')}, tier={info.get('tier')}, platforms={info.get('platforms')})",
                     f"Archetype: {info.get('archetype', '')}",
@@ -252,7 +337,7 @@ def _collect_json_chunks(project_root: Path) -> list[dict[str, str]]:
                 ]
                 chunks.append(
                     {
-                        "chunk_id": f"gta6_streamers:profile:{sid}",
+                        "chunk_id": f"gta6_streamers:profile:{norm_sid}",
                         "source_path": "context/streamer_profiles.json",
                         "domain": "gta6_streamers",
                         "heading": f"Streamer Profile: {info.get('display_name', sid)} ({sid})",
@@ -262,54 +347,216 @@ def _collect_json_chunks(project_root: Path) -> list[dict[str, str]]:
         except Exception:
             pass
 
-    # 2. GTA VI Lore index (Brecha 5)
-    lore_path = project_root / "context" / "gta6_lore_index.json"
-    if lore_path.is_file():
+    # Fallback profile chunks from `studio.db#creators` for the 11+ creators not in streamer_profiles.json
+    if db_path.is_file():
         try:
-            lore_data = json.loads(lore_path.read_text(encoding="utf-8"))
-            for key, val in lore_data.items():
-                if key in {"schema_version", "updated_at", "version"}:
+            for cr in list_creators(db_path=db_path):
+                cid = str(cr.get("creator_id") or "").strip().lower()
+                if not cid or cid in indexed_streamers:
                     continue
-                rendered = json.dumps(val, ensure_ascii=False)
-                if len(rendered) < 30:
-                    continue
+                indexed_streamers.add(cid)
+                extra = cr.get("profile_extra") or {}
+                lines = [
+                    f"Creator: {cr.get('display_name', cid)} (id={cid}, lang={cr.get('language', 'en')}, tier={cr.get('tier')}, platforms={cr.get('platforms')})",
+                    f"Primary platform: {cr.get('primary_platform', 'twitch')} | Webcam style: {cr.get('webcam_style', 'auto_detect')} | Webcam box: {cr.get('webcam_box')}",
+                    f"Style & editing notes: {cr.get('style_notes', '')}",
+                    f"Handles & metadata: {json.dumps(extra, ensure_ascii=False)}",
+                ]
                 chunks.append(
                     {
-                        "chunk_id": f"gta6_streamers:lore:{key}",
-                        "source_path": "context/gta6_lore_index.json",
+                        "chunk_id": f"gta6_streamers:creator_db:{cid}",
+                        "source_path": "runs/studio.db#creators",
                         "domain": "gta6_streamers",
-                        "heading": f"GTA VI Lore Index: {key}",
-                        "content": rendered[:1600],
+                        "heading": f"Creator Profile (SQLite Fallback): {cr.get('display_name', cid)} ({cid})",
+                        "content": "\n".join(lines),
                     }
                 )
         except Exception:
             pass
 
-    # 3. Platform algorithms index + viral style DNA + golden references (Brecha 1)
-    for fname, prefix, heading in (
-        ("platform_algorithms_index.json", "platform_algo", "Platform Algorithms Index"),
-        ("viral_style_dna.json", "style_dna", "Empirical Viral Style DNA"),
-        ("golden_references.json", "golden_refs", "Golden Viral References"),
-    ):
-        fpath = project_root / "context" / fname
-        if not fpath.is_file():
-            continue
+    # 2. GTA VI Lore Index (`context/gta6_lore_index.json` — atomic per character/chapter/easter_egg/item)
+    lore_path = project_root / "context" / "gta6_lore_index.json"
+    if lore_path.is_file():
         try:
-            raw = json.loads(fpath.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                for idx, (k, v) in enumerate(raw.items(), start=1):
-                    txt = json.dumps({k: v}, ensure_ascii=False)
-                    if len(txt) < 35:
-                        continue
-                    chunks.append(
-                        {
-                            "chunk_id": f"shortform_craft:{prefix}:{idx:03d}",
-                            "source_path": f"context/{fname}",
-                            "domain": "shortform_craft",
-                            "heading": f"{heading}: {k}",
-                            "content": txt[:1600],
-                        }
-                    )
+            lore_data = json.loads(lore_path.read_text(encoding="utf-8"))
+            setting_summary = {
+                k: lore_data[k]
+                for k in ("game", "release_date", "platforms", "setting")
+                if k in lore_data
+            }
+            if setting_summary:
+                chunks.append(
+                    {
+                        "chunk_id": "gta6_streamers:lore:setting_overview",
+                        "source_path": "context/gta6_lore_index.json",
+                        "domain": "gta6_streamers",
+                        "heading": "GTA VI Lore: Leonida Setting, Release & Regions",
+                        "content": json.dumps(setting_summary, ensure_ascii=False),
+                    }
+                )
+            chars = lore_data.get("characters")
+            if isinstance(chars, dict):
+                for group_name, char_list in chars.items():
+                    if isinstance(char_list, list):
+                        for ch_item in char_list:
+                            cname = str(ch_item.get("name") or group_name) if isinstance(ch_item, dict) else str(ch_item)
+                            chunks.append(
+                                {
+                                    "chunk_id": f"gta6_streamers:lore:char_{_slugify_id(cname)}",
+                                    "source_path": "context/gta6_lore_index.json",
+                                    "domain": "gta6_streamers",
+                                    "heading": f"GTA VI Character ({group_name}): {cname}",
+                                    "content": json.dumps(ch_item, ensure_ascii=False),
+                                }
+                            )
+            for key, val in lore_data.items():
+                if key in {"schema_version", "updated_at", "version", "game", "release_date", "platforms", "setting", "characters"}:
+                    continue
+                if isinstance(val, list):
+                    for idx, item in enumerate(val, start=1):
+                        item_id = (
+                            str(item.get("id") or item.get("title") or item.get("name") or f"{key}_{idx:03d}")
+                            if isinstance(item, dict)
+                            else f"{key}_{idx:03d}"
+                        )
+                        item_title = (
+                            str(item.get("title") or item.get("name") or item_id)
+                            if isinstance(item, dict)
+                            else f"{key} #{idx}"
+                        )
+                        chunks.append(
+                            {
+                                "chunk_id": f"gta6_streamers:lore:{_slugify_id(key)}_{_slugify_id(item_id)}_{idx:02d}",
+                                "source_path": "context/gta6_lore_index.json",
+                                "domain": "gta6_streamers",
+                                "heading": f"GTA VI Lore ({key}): {item_title}",
+                                "content": json.dumps(item, ensure_ascii=False),
+                            }
+                        )
+                elif isinstance(val, dict):
+                    for sub_k, sub_v in val.items():
+                        chunks.append(
+                            {
+                                "chunk_id": f"gta6_streamers:lore:{_slugify_id(key)}_{_slugify_id(str(sub_k))}",
+                                "source_path": "context/gta6_lore_index.json",
+                                "domain": "gta6_streamers",
+                                "heading": f"GTA VI Lore ({key}): {sub_k}",
+                                "content": json.dumps({sub_k: sub_v}, ensure_ascii=False),
+                            }
+                        )
+                else:
+                    rendered = json.dumps({key: val}, ensure_ascii=False)
+                    if len(rendered) >= 30:
+                        chunks.append(
+                            {
+                                "chunk_id": f"gta6_streamers:lore:{_slugify_id(key)}",
+                                "source_path": "context/gta6_lore_index.json",
+                                "domain": "gta6_streamers",
+                                "heading": f"GTA VI Lore: {key}",
+                                "content": rendered,
+                            }
+                        )
+        except Exception:
+            pass
+
+    # 3. Platform Algorithms Index (`context/platform_algorithms_index.json` — atomic per platform & framework)
+    pa_path = project_root / "context" / "platform_algorithms_index.json"
+    if pa_path.is_file():
+        try:
+            pa_data = json.loads(pa_path.read_text(encoding="utf-8"))
+            for plat_name, plat_obj in (pa_data.get("platforms") or {}).items():
+                chunks.append(
+                    {
+                        "chunk_id": f"shortform_craft:platform_algo:{_slugify_id(plat_name)}",
+                        "source_path": "context/platform_algorithms_index.json",
+                        "domain": "shortform_craft",
+                        "heading": f"Platform Algorithm Spec: {plat_name}",
+                        "content": json.dumps({plat_name: plat_obj}, ensure_ascii=False),
+                    }
+                )
+            if "universal_cover_safe_box_9_16_px" in pa_data:
+                chunks.append(
+                    {
+                        "chunk_id": "design_ctr:platform_algo:universal_safe_box_9_16",
+                        "source_path": "context/platform_algorithms_index.json",
+                        "domain": "design_ctr",
+                        "heading": "Universal 4-Network Cover Safe Box 9:16",
+                        "content": json.dumps(pa_data["universal_cover_safe_box_9_16_px"], ensure_ascii=False),
+                    }
+                )
+            for fw_name, fw_desc in (pa_data.get("creator_and_cognitive_frameworks") or {}).items():
+                chunks.append(
+                    {
+                        "chunk_id": f"shortform_craft:framework:{_slugify_id(fw_name)}",
+                        "source_path": "context/platform_algorithms_index.json",
+                        "domain": "shortform_craft",
+                        "heading": f"Cognitive & Creator Framework: {fw_name}",
+                        "content": f"{fw_name}: {fw_desc}",
+                    }
+                )
+            if pa_data.get("strict_ban_red_lines"):
+                chunks.append(
+                    {
+                        "chunk_id": "bounties_dmca:platform_algo:strict_ban_red_lines",
+                        "source_path": "context/platform_algorithms_index.json",
+                        "domain": "bounties_dmca",
+                        "heading": "Strict Anti-Ban & Compliance Red Lines (5 Networks)",
+                        "content": json.dumps(pa_data["strict_ban_red_lines"], ensure_ascii=False),
+                    }
+                )
+        except Exception:
+            pass
+
+    # 4. Empirical Viral Style DNA (`context/viral_style_dna.json` — targets + 1 chunk per sample)
+    dna_path = project_root / "context" / "viral_style_dna.json"
+    if dna_path.is_file():
+        try:
+            dna_data = json.loads(dna_path.read_text(encoding="utf-8"))
+            summary_dna = {
+                k: dna_data[k]
+                for k in ("sample_count", "empirical_medians", "recommended_targets")
+                if k in dna_data
+            }
+            if summary_dna:
+                chunks.append(
+                    {
+                        "chunk_id": "shortform_craft:style_dna:targets_and_medians",
+                        "source_path": "context/viral_style_dna.json",
+                        "domain": "shortform_craft",
+                        "heading": "Empirical Viral Style DNA: Medians & Targets",
+                        "content": json.dumps(summary_dna, ensure_ascii=False),
+                    }
+                )
+            for idx, sample in enumerate(dna_data.get("samples") or [], start=1):
+                lbl = str(sample.get("title") or sample.get("label") or f"sample_{idx}")[:80]
+                chunks.append(
+                    {
+                        "chunk_id": f"shortform_craft:style_dna:sample_{idx:03d}",
+                        "source_path": "context/viral_style_dna.json",
+                        "domain": "shortform_craft",
+                        "heading": f"Viral Outlier DNA Sample #{idx}: {lbl}",
+                        "content": json.dumps(sample, ensure_ascii=False),
+                    }
+                )
+        except Exception:
+            pass
+
+    # 5. Golden Viral References (`context/golden_references.json` — 1 chunk per reference)
+    gr_path = project_root / "context" / "golden_references.json"
+    if gr_path.is_file():
+        try:
+            gr_data = json.loads(gr_path.read_text(encoding="utf-8"))
+            for idx, ref in enumerate(gr_data.get("golden_references") or [], start=1):
+                r_title = str(ref.get("title") or ref.get("source_id") or f"ref_{idx}")[:80]
+                chunks.append(
+                    {
+                        "chunk_id": f"shortform_craft:golden_ref:{idx:03d}",
+                        "source_path": "context/golden_references.json",
+                        "domain": "shortform_craft",
+                        "heading": f"Golden Viral Reference #{idx} ({ref.get('platform')}): {r_title}",
+                        "content": json.dumps(ref, ensure_ascii=False),
+                    }
+                )
         except Exception:
             pass
 
@@ -317,17 +564,16 @@ def _collect_json_chunks(project_root: Path) -> list[dict[str, str]]:
 
 
 def _collect_episodic_and_bounty_chunks(db_path: Path, project_root: Path) -> list[dict[str, str]]:
-    """Collect live episodic memory (clips + BlindCritic feedback + publish_metrics) and bounty campaigns."""
+    """Collect live episodic memory (clips + BlindCritic + deduplicated publish_metrics) and bounty campaigns."""
     chunks: list[dict[str, str]] = []
     init_db(db_path)
     conn = sqlite3.connect(str(db_path), timeout=15.0)
     conn.row_factory = sqlite3.Row
     try:
-        # 1. Clips in studio.db (Brecha 6)
         clip_rows = conn.execute(
             """
             SELECT run_id, clip_id, streamer_id, start_trim, end_trim, layout_mode,
-                   matched_lore_entity, critic_overall, media_check_passed, lufs, dbtp, packaging_json
+                   matched_lore_entity, critic_overall, media_check_passed, lufs, dbtp, packaging_json, status
             FROM clips
             ORDER BY critic_overall DESC, updated_at DESC
             LIMIT 200
@@ -343,13 +589,18 @@ def _collect_episodic_and_bounty_chunks(db_path: Path, project_root: Path) -> li
                     pkg_hook = str(pkg.get("suggested_on_screen_hook") or "")
                 except Exception:
                     pass
-            outcome = "WINNER" if (int(r["media_check_passed"] or 0) == 1 and float(r["critic_overall"] or 0) >= 0.75) else "REVIEW_OR_FAIL"
+            status_val = str(r["status"] or "READY_HITL")
+            outcome = (
+                "WINNER"
+                if (int(r["media_check_passed"] or 0) == 1 and float(r["critic_overall"] or 0) >= 0.75 and status_val == "READY_HITL")
+                else f"STATUS_{status_val}"
+            )
             dur = round(max(0.0, float(r["end_trim"] or 0) - float(r["start_trim"] or 0)), 1)
             body = (
                 f"Episodic Clip [{outcome}] run={r['run_id']} clip={r['clip_id']} streamer={r['streamer_id']} "
                 f"dur={dur}s layout={r['layout_mode']} lore={r['matched_lore_entity'] or 'none'} "
                 f"critic_overall={float(r['critic_overall'] or 0):.2f} media_check={bool(r['media_check_passed'])} "
-                f"lufs={float(r['lufs'] or 0):.1f} dbtp={float(r['dbtp'] or 0):.1f} "
+                f"status={status_val} lufs={float(r['lufs'] or 0):.1f} dbtp={float(r['dbtp'] or 0):.1f} "
                 f"title={pkg_title!r} hook={pkg_hook!r}"
             )
             chunks.append(
@@ -362,18 +613,18 @@ def _collect_episodic_and_bounty_chunks(db_path: Path, project_root: Path) -> li
                 }
             )
 
-        # 2. Publish metrics & telemetry events (Brecha 6)
+        # Non-publish_metrics telemetry (avoids double-indexing publish_metrics!)
         tel_rows = conn.execute(
             """
             SELECT id, ts, run_id, event_type, payload_json
             FROM telemetry
-            WHERE event_type IN ('publish_metrics', 'critic_feedback', 'compilation_rendered')
+            WHERE event_type IN ('critic_feedback', 'compilation_rendered', 'visual_qa_verdict')
             ORDER BY id DESC
             LIMIT 100
             """
         ).fetchall()
         for r in tel_rows:
-            body = f"Telemetry {r['event_type']} run={r['run_id']} ts={r['ts']}: {str(r['payload_json'])[:1200]}"
+            body = f"Telemetry {r['event_type']} run={r['run_id']} ts={r['ts']}: {r['payload_json']}"
             chunks.append(
                 {
                     "chunk_id": f"episodic_memory:telemetry:{r['id']}",
@@ -384,7 +635,6 @@ def _collect_episodic_and_bounty_chunks(db_path: Path, project_root: Path) -> li
                 }
             )
 
-        # 3. Bounty campaigns (Brecha 4)
         camp_rows = conn.execute(
             "SELECT campaign_id, platform, title, cpm_usd, burn_rate_pct, geo_lock, voice_policy, brief_text, verdict FROM campaigns LIMIT 100"
         ).fetchall()
@@ -392,7 +642,7 @@ def _collect_episodic_and_bounty_chunks(db_path: Path, project_root: Path) -> li
             body = (
                 f"Campaign {r['campaign_id']} [{r['verdict']}] platform={r['platform']} title={r['title']} "
                 f"cpm=${float(r['cpm_usd'] or 0):.2f} burn={float(r['burn_rate_pct'] or 0):.1f}% "
-                f"geo={r['geo_lock']} voice={r['voice_policy']} brief={str(r['brief_text'] or '')[:700]}"
+                f"geo={r['geo_lock']} voice={r['voice_policy']} brief={r['brief_text'] or ''}"
             )
             chunks.append(
                 {
@@ -404,9 +654,9 @@ def _collect_episodic_and_bounty_chunks(db_path: Path, project_root: Path) -> li
                 }
             )
 
-        # 3b. Real post-publish analytics metrics -> episodic_memory
+        # Single canonical index of post-publish metrics
         pm_rows = conn.execute(
-            "SELECT id, ts, run_id, payload_json FROM telemetry WHERE event_type = 'publish_metrics' ORDER BY id DESC LIMIT 40"
+            "SELECT id, ts, run_id, payload_json FROM telemetry WHERE event_type = 'publish_metrics' ORDER BY id DESC LIMIT 60"
         ).fetchall()
         for r in pm_rows:
             try:
@@ -440,7 +690,6 @@ def _collect_episodic_and_bounty_chunks(db_path: Path, project_root: Path) -> li
     finally:
         conn.close()
 
-    # 4. BlindCritic feedback from runs/*/state.json (captures both winners AND rejected errors!)
     runs_dir = project_root / "runs"
     if runs_dir.is_dir():
         for state_file in sorted(runs_dir.glob("*/state.json")):
@@ -466,7 +715,7 @@ def _collect_episodic_and_bounty_chunks(db_path: Path, project_root: Path) -> li
                             "source_path": f"runs/{run_id}/state.json",
                             "domain": "episodic_memory",
                             "heading": f"BlindCritic {tag}: {streamer} {cr.get('clip_id', idx)}",
-                            "content": body[:1500],
+                            "content": body,
                         }
                     )
             except Exception:
@@ -479,10 +728,10 @@ def collect_all_knowledge_chunks(
     project_root: Path = PROJECT_ROOT,
     db_path: Path = DEFAULT_DB_PATH,
 ) -> list[dict[str, str]]:
-    """Collect all chunks covering the 6 knowledge gaps for local RAG indexing."""
+    """Collect all chunks covering the 6 knowledge domains + all `7/7` skills for local RAG indexing."""
     chunks: list[dict[str, str]] = []
 
-    # Gap 1: Short-Form 9:16 & 5-Network Algorithms
+    # Canonical Bibles in docs/
     chunks.extend(_split_markdown_chunks(project_root / "docs" / "style_bible.md", "shortform_craft"))
     chunks.extend(_split_markdown_chunks(project_root / "docs" / "algorithms_and_virality_bible.md", "shortform_craft"))
     chunks.extend(
@@ -492,42 +741,25 @@ def collect_all_knowledge_chunks(
             domain_router=_route_editing_bible_domain,
         )
     )
-
-    # Gap 2: Design & CTR Packaging
     chunks.extend(_split_markdown_chunks(project_root / "docs" / "design_bible.md", "design_ctr"))
-    chunks.extend(
-        _split_markdown_chunks(
-            project_root / ".agents" / "skills" / "visual-packaging-designer" / "SKILL.md",
-            "design_ctr",
-        )
-    )
-
-    # Gap 3: Media Engineering Recipes
     chunks.extend(_split_markdown_chunks(project_root / "docs" / "engineering_patterns.md", "media_engineering"))
-    chunks.extend(
-        _split_markdown_chunks(
-            project_root / ".agents" / "skills" / "media-engineer" / "SKILL.md",
-            "media_engineering",
-        )
-    )
-
-    # Gap 4: Bounties CPM & Anti-DMCA
     chunks.extend(_split_markdown_chunks(project_root / "docs" / "marketing_playbook.md", "bounties_dmca"))
-    chunks.extend(
-        _split_markdown_chunks(
-            project_root / ".agents" / "skills" / "bounty-and-distribution-ops" / "SKILL.md",
-            "bounties_dmca",
-        )
-    )
 
-    # Gap 5: GTA VI Lore & Streamers
+    # All 7/7 Skills in `.agents/skills/*/SKILL.md`
+    skills_root = project_root / ".agents" / "skills"
+    if skills_root.is_dir():
+        for skill_md in sorted(skills_root.glob("*/SKILL.md")):
+            skill_name = skill_md.parent.name
+            dom = SKILL_DOMAIN_MAP.get(skill_name, "shortform_craft")
+            chunks.extend(_split_markdown_chunks(skill_md, dom))
+
+    # GTA VI Living Brief + Atomic JSONs + SQLite creators fallback
     chunks.extend(_split_markdown_chunks(project_root / "context" / "gta6_living_brief.md", "gta6_streamers"))
-    chunks.extend(_collect_json_chunks(project_root))
+    chunks.extend(_collect_json_chunks(project_root, db_path=db_path))
 
-    # Gap 6: Episodic Memory + Campaigns from studio.db & runs/*/state.json
+    # Episodic Memory + Campaigns
     chunks.extend(_collect_episodic_and_bounty_chunks(db_path=db_path, project_root=project_root))
 
-    # Deduplicate by chunk_id preserving last definition
     dedup: dict[str, dict[str, str]] = {}
     for ch in chunks:
         dedup[ch["chunk_id"]] = ch
@@ -541,7 +773,7 @@ def rebuild_rag_index(
     embed_fn: EmbedFn | None = None,
     skip_vectors: bool = False,
 ) -> dict[str, Any]:
-    """Idempotently ingest all 6 knowledge gaps into `rag_chunks`, `rag_chunks_fts`, and `rag_chunks_vec`."""
+    """Idempotently ingest all knowledge gaps into `rag_chunks`, `rag_chunks_fts`, and `rag_chunks_vec` (`domain` + `float[384]`)."""
     init_rag_tables(db_path)
     chunks = chunks_override if chunks_override is not None else collect_all_knowledge_chunks(project_root, db_path)
     now = datetime.now(UTC).isoformat()
@@ -549,19 +781,20 @@ def rebuild_rag_index(
     conn, vec_ok = _connect_rag(db_path)
     use_vec = vec_ok and not skip_vectors
     inserted, updated, unchanged, embedded = 0, 0, 0, 0
-    to_embed: list[tuple[int, str]] = []
+    to_embed: list[tuple[int, str, str]] = []
     domain_counts: dict[str, int] = {}
 
     try:
         existing_rows = {
-            str(r["chunk_id"]): (int(r["rowid"]), str(r["content_sha256"]))
-            for r in conn.execute("SELECT rowid, chunk_id, content_sha256 FROM rag_chunks").fetchall()
+            str(r["chunk_id"]): (int(r["rowid"]), str(r["content_sha256"]), str(r["domain"]))
+            for r in conn.execute("SELECT rowid, chunk_id, content_sha256, domain FROM rag_chunks").fetchall()
         }
-        existing_vec_ids: set[int] = set()
+        existing_vec_domains: dict[int, str] = {}
         if use_vec:
             try:
-                existing_vec_ids = {
-                    int(r[0]) for r in conn.execute("SELECT chunk_rowid FROM rag_chunks_vec").fetchall()
+                existing_vec_domains = {
+                    int(r[0]): str(r[1] or "")
+                    for r in conn.execute("SELECT chunk_rowid, domain FROM rag_chunks_vec").fetchall()
                 }
             except sqlite3.Error:
                 use_vec = False
@@ -583,8 +816,8 @@ def rebuild_rag_index(
             if prev and prev[1] == sha:
                 unchanged += 1
                 rowid = prev[0]
-                if use_vec and rowid not in existing_vec_ids:
-                    to_embed.append((rowid, f"{heading}\n{content}"))
+                if use_vec and existing_vec_domains.get(rowid) != dom:
+                    to_embed.append((rowid, dom, f"{heading}\n{content}"))
                 continue
 
             if prev:
@@ -610,9 +843,8 @@ def rebuild_rag_index(
                 inserted += 1
 
             if use_vec and rowid > 0:
-                to_embed.append((rowid, f"{heading}\n{content}"))
+                to_embed.append((rowid, dom, f"{heading}\n{content}"))
 
-        # Prune stale chunk_ids no longer present + any orphan vectors in rag_chunks_vec
         stale_ids = set(existing_rows) - active_chunk_ids
         if stale_ids:
             for sid in stale_ids:
@@ -630,26 +862,32 @@ def rebuild_rag_index(
             for oid in orphan_ids:
                 conn.execute("DELETE FROM rag_chunks_vec WHERE chunk_rowid = ?", (oid,))
 
-        # Rebuild external-content FTS5 index atomically (guaranteed 100% consistent)
         conn.execute("INSERT INTO rag_chunks_fts(rag_chunks_fts) VALUES('rebuild')")
 
-        # Compute & upsert missing/changed embeddings in batches
         if use_vec and to_embed:
             batch_size = 32
             for start in range(0, len(to_embed), batch_size):
                 batch = to_embed[start : start + batch_size]
-                vecs = embed_texts([txt for _, txt in batch], embed_fn=embed_fn)
-                for (rowid, _), vec in zip(batch, vecs, strict=True):
+                vecs = embed_texts([txt for _, _, txt in batch], embed_fn=embed_fn)
+                for (rowid, dom, _), vec in zip(batch, vecs, strict=True):
                     conn.execute("DELETE FROM rag_chunks_vec WHERE chunk_rowid = ?", (rowid,))
                     conn.execute(
-                        "INSERT INTO rag_chunks_vec (chunk_rowid, embedding) VALUES (?, ?)",
-                        (rowid, _serialize_f32(vec)),
+                        "INSERT INTO rag_chunks_vec (chunk_rowid, domain, embedding) VALUES (?, ?, ?)",
+                        (rowid, dom, _serialize_f32(vec)),
                     )
                     embedded += 1
 
         conn.commit()
         total_rows = int(conn.execute("SELECT COUNT(*) FROM rag_chunks").fetchone()[0])
         vec_rows = int(conn.execute("SELECT COUNT(*) FROM rag_chunks_vec").fetchone()[0]) if use_vec else 0
+        skills_indexed = len(
+            {
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT DISTINCT source_path FROM rag_chunks WHERE source_path LIKE '.agents/skills/%/SKILL.md'"
+                ).fetchall()
+            }
+        )
     finally:
         conn.close()
 
@@ -658,6 +896,7 @@ def rebuild_rag_index(
         "total_chunks": total_rows,
         "vec_chunks": vec_rows,
         "vec_enabled": use_vec,
+        "skills_indexed": skills_indexed,
         "inserted": inserted,
         "updated": updated,
         "unchanged": unchanged,
@@ -673,9 +912,27 @@ def _build_safe_fts_query(raw_query: str) -> str:
         return ""
     dedup: list[str] = []
     seen: set[str] = set()
+    stop = {
+        "or",
+        "and",
+        "not",
+        "near",
+        "the",
+        "for",
+        "with",
+        "from",
+        "that",
+        "this",
+        "para",
+        "como",
+        "con",
+        "del",
+        "las",
+        "los",
+    }
     for t in tokens:
         low = t.lower()
-        if low in {"or", "and", "not", "near", "the", "for", "with", "from", "that", "this", "para", "como", "con", "del", "las", "los"}:
+        if low in stop:
             continue
         if low not in seen:
             seen.add(low)
@@ -685,23 +942,61 @@ def _build_safe_fts_query(raw_query: str) -> str:
     return " OR ".join(dedup[:12])
 
 
+# Valuable psychology, editing, design, sound, UX, copywriting, and visual QA sources NEVER treated as webdev noise.
+_VALUABLE_FEDERATED_ALLOWLIST = (
+    "hooked_habit_forming",
+    "nudge_thaler_sunstein",
+    "library_ingest_07_",
+    "albers_thaler_epstein",
+    "compendio_55_videocursos",
+    "marketing-psychology",
+    "marketing_psychology",
+    "copywriting/ai-tells",
+    "ai-tells.md",
+    "canon_automated_visual_qa_vlm_critic_and_cto_hitl_gate_2026",
+    "blink_of_an_eye",
+    "walter_murch",
+    "visual_story",
+    "bruce_block",
+    "color_and_light",
+    "james_gurney",
+    "grid_systems",
+    "muller_brockmann",
+    "thinking_with_type",
+    "ellen_lupton",
+    "interaction_of_color",
+    "josef_albers",
+    "audio_vision",
+    "michel_chion",
+    "save_the_cat",
+    "robert_mckee",
+    "thinking_fast_and_slow",
+    "kahneman",
+    "cialdini",
+    "contagious",
+    "made_to_stick",
+    "refactoring_ui",
+    "laws_of_ux",
+    "dont_make_me_think",
+    "design_of_everyday_things",
+    "gamers_brain",
+    "celia_hodent",
+    "hawkes",
+    "centinela",
+)
+
 _WEBDEV_NOISE_PATTERNS = (
     "react hook",
     "react-hook-form",
     "react native",
     "reactjs",
-    "react:",
-    "react up",
     "next.js",
     "nextjs",
-    "tailwind",
     "useeffect",
     "usestate",
     "usememo",
     "usecallback",
     "usecontext",
-    "typescript",
-    "javascript framework",
     "cloudflare worker",
     "wrangler",
     "prisma",
@@ -712,17 +1007,11 @@ _WEBDEV_NOISE_PATTERNS = (
     "vite.config",
     "shadcn",
     "graphql",
-    "rest api",
     "sql injection",
     "rls policy",
     "eslint",
     "biome.json",
     "node_modules",
-    "css grid",
-    "flexbox",
-    "dom manipulation",
-    "frontend component",
-    "backend endpoint",
     "astro.config",
     "svelte",
     "angular",
@@ -735,60 +1024,50 @@ _WEBDEV_NOISE_PATTERNS = (
     "posttooluse",
     "session-stop",
     "beautiful_code",
-    "source code",
-    "software engineering",
     "kubernetes",
-    "docker",
     "terraform",
     "git hook",
     "pre-commit",
     "mern",
-    "full stack",
-    "full-stack",
-    "full_stack",
     "mongodb",
-    "node.js",
-    "nodejs",
-    "web development",
-    "javascript",
-    "html/css",
-    "http server",
     "microservices",
-    "kubernetes",
+    "game engine architecture",
+    "jason gregory",
 )
+
 _WEBDEV_NOISE_CATEGORIES = frozenset(
     {
         "frontend",
         "backend",
-        "web",
         "webdev",
-        "css",
         "react",
         "nextjs",
         "security_web",
         "cloudflare",
         "database",
         "devops",
-        "api",
-        "agent-skill",
-        "tooling",
         "infra",
     }
 )
 
 
 def _is_webdev_noise_hit(rel_path: str, category: str, heading: str, text: str) -> bool:
-    """Return True if a federated Omni-RAG v6 hit is web-dev/software-engineering noise."""
+    """Return True if a federated Omni-RAG / Qdrant hit is unrelated web-dev/infra/C++ engine noise."""
+    path_low = rel_path.replace("\\", "/").lower()
+    head_low = heading.lower()
+    combined_meta = f"{path_low} {head_low}"
+    if any(allow_tok in combined_meta for allow_tok in _VALUABLE_FEDERATED_ALLOWLIST):
+        return False
+
     cat_low = category.strip().lower()
     if cat_low in _WEBDEV_NOISE_CATEGORIES:
         return True
-    path_low = rel_path.replace("\\", "/").lower()
+
     if any(
         seg in path_low
         for seg in (
             "/react",
             "/next",
-            "/css",
             "/tailwind",
             "/frontend",
             "/backend",
@@ -797,7 +1076,7 @@ def _is_webdev_noise_hit(rel_path: str, category: str, heading: str, text: str) 
             "/prisma",
             "/drizzle",
             "/supabase",
-            ".agents/skills/",
+            "projects/",
             "react_hook",
             "hook_form",
             "hook-integration",
@@ -805,12 +1084,12 @@ def _is_webdev_noise_hit(rel_path: str, category: str, heading: str, text: str) 
             "clean_code",
             "pragmatic_programmer",
             "designing_data_intensive",
+            "game_engine_architecture",
+            "jason_gregory",
             "mern_stack",
             "full_stack",
             "node_js",
             "web_dev",
-            "software_factory/",
-            "architecture_and_books/",
             "cybersecurity/",
             "bug_bounty",
             "pro_git",
@@ -818,8 +1097,6 @@ def _is_webdev_noise_hit(rel_path: str, category: str, heading: str, text: str) 
             "react_",
             ".tsx",
             ".jsx",
-            ".css",
-            ".ts",
             ".mjs",
         )
     ):
@@ -830,27 +1107,23 @@ def _is_webdev_noise_hit(rel_path: str, category: str, heading: str, text: str) 
 
 def query_omni_rag_federated(
     query: str,
-    limit: int = 4,
+    limit: int = 6,
     omni_dir: Path | None = None,
     exclude_webdev_noise: bool = True,
 ) -> list[dict[str, Any]]:
-    """Read-only FTS5 BM25 query against Omni-RAG v6 (`rag_hot.sqlite` + `rag_library.sqlite`).
-
-    Strictly opens with `?mode=ro&immutable=1` so zero `-wal`/`-shm` files are created or locked
-    in `web-software-factory/.cache/`. Filters out React/CSS/backend web-dev noise by default
-    so audiovisual queries (e.g. "hook") only retrieve relevant psychology/editing/UX knowledge.
-    """
+    """Read-only FTS5 BM25 query against Omni-RAG v6 (`rag_hot.sqlite` + `rag_library.sqlite`) via `?mode=ro&immutable=1`."""
     fts_q = _build_safe_fts_query(query)
     if not fts_q:
         return []
 
-    base_dir = omni_dir or DEFAULT_OMNI_RAG_DIR
+    base_dir = omni_dir or resolve_omni_rag_dir(PROJECT_ROOT)
     if not base_dir.is_dir():
         return []
 
-    raw_fetch = max(limit * 6, 24)
+    raw_fetch = max(limit * 8, 36)
     hits: list[dict[str, Any]] = []
-    for db_name, source_tag in (("rag_hot.sqlite", "omni_rag_hot"), ("rag_library.sqlite", "omni_rag_library")):
+    # Query rag_library.sqlite (290 canonical books) first alongside rag_hot.sqlite so books are never starved
+    for db_name, source_tag in (("rag_library.sqlite", "omni_rag_library"), ("rag_hot.sqlite", "omni_rag_hot")):
         db_file = base_dir / db_name
         if not db_file.is_file():
             continue
@@ -888,9 +1161,9 @@ def query_omni_rag_federated(
                         "source_path": rel_p,
                         "domain": f"federated:{cat or 'omni_rag'}",
                         "heading": head,
-                        "content": txt[:900],
+                        "content": txt[:1100],
                         "bm25_rank": kept_rank,
-                        "rrf_score": round(1.9 / (RRF_K + kept_rank), 6),
+                        "rrf_score": round(1.0 / (RRF_K + kept_rank), 6),
                     }
                 )
                 if kept_rank >= limit:
@@ -901,8 +1174,174 @@ def query_omni_rag_federated(
             if conn is not None:
                 conn.close()
 
-    hits.sort(key=lambda x: x["rrf_score"], reverse=True)
-    return hits[:limit]
+    return hits
+
+
+def _resolve_qdrant_url() -> str:
+    """Resolve Qdrant Cloud URL from `QDRANT_URL` or `QDRANT_HOST` without printing secrets."""
+    raw = (os.getenv("QDRANT_URL") or os.getenv("QDRANT_HOST") or "").strip()
+    if not raw:
+        return ""
+    if not raw.startswith(("http://", "https://")):
+        raw = f"https://{raw}"
+    return raw
+
+
+def _get_qdrant_readonly_client() -> Any | None:
+    """Instantiate read-only `QdrantClient` if `QDRANT_URL`/`QDRANT_HOST` + `QDRANT_API_KEY` exist; return None silently otherwise."""
+    global _QDRANT_CLIENT_CACHE
+    if _QDRANT_CLIENT_CACHE is not None:
+        return _QDRANT_CLIENT_CACHE
+    load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
+    url = _resolve_qdrant_url()
+    api_key = (os.getenv("QDRANT_API_KEY") or "").strip()
+    if not url or not api_key:
+        return None
+    try:
+        from qdrant_client import QdrantClient
+
+        _QDRANT_CLIENT_CACHE = QdrantClient(url=url, api_key=api_key, timeout=6)
+        return _QDRANT_CLIENT_CACHE
+    except Exception:
+        return None
+
+
+def _embed_vertex_768_readonly(query: str) -> list[float] | None:
+    """Optional 768-d Vertex `text-embedding-005` query embedding for `hunthub_omni_rag_v5` read-only search."""
+    proj = (os.getenv("GCP_PROJECT_ID") or "").strip()
+    loc = (os.getenv("GCP_LOCATION") or "us-central1").strip() or "us-central1"
+    if not proj:
+        return None
+    gac = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
+    if gac and not Path(gac).is_file():
+        os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+    try:
+        from google import genai
+
+        client = genai.Client(vertexai=True, project=proj, location=loc)
+        resp = client.models.embed_content(model="text-embedding-005", contents=query)
+        embs = getattr(resp, "embeddings", None) or []
+        if embs and getattr(embs[0], "values", None):
+            return [float(v) for v in embs[0].values]
+    except Exception:
+        return None
+    return None
+
+
+def query_qdrant_readonly(
+    query: str,
+    limit: int = 4,
+    *,
+    embed_fn: EmbedFn | None = None,
+    exclude_webdev_noise: bool = True,
+    collections: tuple[str, ...] = ("centinela_knowledge", "hunthub_omni_rag_v5"),
+) -> list[dict[str, Any]]:
+    """Query Qdrant Cloud strictly in READ-ONLY mode (`query_points` only) with silent fallback on offline/missing creds."""
+    if not query.strip():
+        return []
+    client = _get_qdrant_readonly_client()
+    if client is None:
+        return []
+
+    hits: list[dict[str, Any]] = []
+    # 1. centinela_knowledge (384d BAAI/bge-small-en-v1.5: Hawkes, Kick HLS, clipper pipelines)
+    if "centinela_knowledge" in collections:
+        try:
+            vec_384 = embed_texts([query], embed_fn=embed_fn)[0]
+            res_c = client.query_points(
+                collection_name="centinela_knowledge",
+                query=vec_384,
+                limit=max(2, limit),
+                with_payload=True,
+            )
+            for rank, pt in enumerate(getattr(res_c, "points", None) or [], start=1):
+                pl = dict(getattr(pt, "payload", None) or {})
+                txt = str(pl.get("text") or pl.get("content") or pl.get("chunk_text") or "").strip()
+                if not txt:
+                    continue
+                src_p = str(pl.get("source") or pl.get("file_path") or pl.get("rel_path") or "centinela_knowledge")
+                head = str(pl.get("title") or pl.get("heading") or src_p)
+                cat = str(pl.get("category") or pl.get("domain") or "centinela")
+                if exclude_webdev_noise and _is_webdev_noise_hit(src_p, cat, head, txt):
+                    continue
+                hits.append(
+                    {
+                        "chunk_id": f"qdrant_ro:centinela:{pt.id}",
+                        "source": "qdrant_ro:centinela_knowledge",
+                        "source_path": src_p,
+                        "domain": f"qdrant:{cat}",
+                        "heading": head,
+                        "content": txt[:1100],
+                        "qdrant_score": round(float(getattr(pt, "score", 0.0) or 0.0), 4),
+                        "rrf_score": round(1.0 / (RRF_K + rank), 6),
+                    }
+                )
+        except Exception:
+            pass
+
+    # 2. hunthub_omni_rag_v5 (768d text-embedding-005: 14-department matrices, visual QA plates, canon)
+    if "hunthub_omni_rag_v5" in collections and embed_fn is None:
+        vec_768 = _embed_vertex_768_readonly(query)
+        if vec_768 is not None:
+            try:
+                res_h = client.query_points(
+                    collection_name="hunthub_omni_rag_v5",
+                    query=vec_768,
+                    limit=max(2, limit),
+                    with_payload=True,
+                )
+                for rank, pt in enumerate(getattr(res_h, "points", None) or [], start=1):
+                    pl = dict(getattr(pt, "payload", None) or {})
+                    txt = str(pl.get("text") or pl.get("content") or pl.get("chunk_text") or "").strip()
+                    if not txt:
+                        continue
+                    src_p = str(pl.get("rel_path") or pl.get("source") or pl.get("doc_path") or "hunthub_omni_rag_v5")
+                    head = str(pl.get("heading_path") or pl.get("title") or src_p)
+                    cat = str(pl.get("category") or pl.get("department") or "omni_v5")
+                    if exclude_webdev_noise and _is_webdev_noise_hit(src_p, cat, head, txt):
+                        continue
+                    hits.append(
+                        {
+                            "chunk_id": f"qdrant_ro:omni_v5:{pt.id}",
+                            "source": "qdrant_ro:hunthub_omni_rag_v5",
+                            "source_path": src_p,
+                            "domain": f"qdrant:{cat}",
+                            "heading": head,
+                            "content": txt[:1100],
+                            "qdrant_score": round(float(getattr(pt, "score", 0.0) or 0.0), 4),
+                            "rrf_score": round(1.0 / (RRF_K + rank), 6),
+                        }
+                    )
+            except Exception:
+                pass
+
+    return hits
+
+
+def _is_gta_lore_query(query: str, domain: str | None) -> bool:
+    if domain == "gta6_streamers":
+        return True
+    return bool(_GTA_LORE_GUARD_RE.search(query or ""))
+
+
+def _passes_domain_guard(hit: dict[str, Any], query: str, domain: str | None, ce_logit: float) -> bool:
+    """Prevent external general books (e.g. C++ Game Engine Architecture by 'Jason' Gregory) from polluting GTA VI lore queries."""
+    src = str(hit.get("source") or "")
+    if src == "studio_local":
+        return True
+
+    # Strict minimum cross-encoder relevance threshold across all federated hits
+    if ce_logit < -5.5:
+        return False
+
+    # If the caller explicitly requested local episodic_memory or gta6_streamers, or query is specific GTA VI lore:
+    if domain in {"gta6_streamers", "episodic_memory"} or _is_gta_lore_query(query, domain):
+        hay = f"{hit.get('heading', '')} {hit.get('content', '')}"
+        # External hit is only allowed on a GTA VI lore query if it genuinely discusses GTA VI / streaming AND scores high
+        if not _GTA_LORE_GUARD_RE.search(hay) or ce_logit < 1.5:
+            return False
+
+    return True
 
 
 def query_rag(
@@ -913,9 +1352,11 @@ def query_rag(
     db_path: Path = DEFAULT_DB_PATH,
     omni_dir: Path | None = None,
     embed_fn: EmbedFn | None = None,
+    rerank_fn: RerankFn | None = None,
     use_vectors: bool = True,
+    include_qdrant: bool = True,
 ) -> list[dict[str, Any]]:
-    """Hybrid BM25 + sqlite-vec RRF ($k=60$) search over studio.db with optional read-only Omni-RAG v6 bridge."""
+    """Hybrid BM25 + `sqlite-vec` (`domain` pre-KNN) + `TextCrossEncoder` reranking + optional Federated/Qdrant RO."""
     init_rag_tables(db_path)
     conn, vec_ok = _connect_rag(db_path)
     fts_q = _build_safe_fts_query(query)
@@ -957,48 +1398,64 @@ def query_rag(
                 bm25_ranks[rid] = rank
                 row_cache[rid] = dict(r)
 
-        # 2. Local sqlite-vec vector KNN leg
+        # 2. Local sqlite-vec 0.1.9 vector KNN leg with native pre-KNN `v.domain = ?` filter
         if use_vectors and vec_ok and query.strip():
             try:
-                vec_count = int(conn.execute("SELECT COUNT(*) FROM rag_chunks_vec").fetchone()[0])
-                if vec_count > 0:
-                    q_vec = embed_texts([query], embed_fn=embed_fn)[0]
-                    vec_rows = conn.execute(
-                        """
-                        SELECT v.chunk_rowid, v.distance,
-                               r.chunk_id, r.source_path, r.domain, r.heading, r.content
-                        FROM rag_chunks_vec v
-                        JOIN rag_chunks r ON r.rowid = v.chunk_rowid
-                        WHERE v.embedding MATCH ? AND k = ?
-                        ORDER BY v.distance
-                        """,
-                        (_serialize_f32(q_vec), min(cand_limit * 2, vec_count)),
-                    ).fetchall()
-                    rank_idx = 0
-                    for r in vec_rows:
-                        if domain and str(r["domain"]) != domain:
-                            continue
-                        rank_idx += 1
-                        rid = int(r["chunk_rowid"])
-                        vec_ranks[rid] = rank_idx
-                        if rid not in row_cache:
-                            row_cache[rid] = {
-                                "rowid": rid,
-                                "chunk_id": r["chunk_id"],
-                                "source_path": r["source_path"],
-                                "domain": r["domain"],
-                                "heading": r["heading"],
-                                "content": r["content"],
-                            }
-                        if rank_idx >= cand_limit:
-                            break
+                if domain:
+                    dom_cnt = int(
+                        conn.execute("SELECT COUNT(*) FROM rag_chunks_vec WHERE domain = ?", (domain,)).fetchone()[0]
+                    )
+                    if dom_cnt > 0:
+                        q_vec = embed_texts([query], embed_fn=embed_fn)[0]
+                        vec_rows = conn.execute(
+                            """
+                            SELECT v.chunk_rowid, v.distance,
+                                   r.chunk_id, r.source_path, r.domain, r.heading, r.content
+                            FROM rag_chunks_vec v
+                            JOIN rag_chunks r ON r.rowid = v.chunk_rowid
+                            WHERE v.embedding MATCH ? AND k = ? AND v.domain = ?
+                            ORDER BY v.distance
+                            """,
+                            (_serialize_f32(q_vec), min(cand_limit, dom_cnt), domain),
+                        ).fetchall()
+                    else:
+                        vec_rows = []
+                else:
+                    vec_count = int(conn.execute("SELECT COUNT(*) FROM rag_chunks_vec").fetchone()[0])
+                    if vec_count > 0:
+                        q_vec = embed_texts([query], embed_fn=embed_fn)[0]
+                        vec_rows = conn.execute(
+                            """
+                            SELECT v.chunk_rowid, v.distance,
+                                   r.chunk_id, r.source_path, r.domain, r.heading, r.content
+                            FROM rag_chunks_vec v
+                            JOIN rag_chunks r ON r.rowid = v.chunk_rowid
+                            WHERE v.embedding MATCH ? AND k = ?
+                            ORDER BY v.distance
+                            """,
+                            (_serialize_f32(q_vec), min(cand_limit, vec_count)),
+                        ).fetchall()
+                    else:
+                        vec_rows = []
+
+                for rank_idx, r in enumerate(vec_rows, start=1):
+                    rid = int(r["chunk_rowid"])
+                    vec_ranks[rid] = rank_idx
+                    if rid not in row_cache:
+                        row_cache[rid] = {
+                            "rowid": rid,
+                            "chunk_id": r["chunk_id"],
+                            "source_path": r["source_path"],
+                            "domain": r["domain"],
+                            "heading": r["heading"],
+                            "content": r["content"],
+                        }
             except Exception:
-                # Degrade gracefully to BM25-only if embedding runtime is unavailable
                 pass
     finally:
         conn.close()
 
-    # 3. Reciprocal Rank Fusion (k=60)
+    # 3. Local Reciprocal Rank Fusion (k=60)
     fused: list[dict[str, Any]] = []
     for rid, item in row_cache.items():
         score = 0.0
@@ -1019,21 +1476,43 @@ def query_rag(
                 "rrf_score": round(score, 6),
             }
         )
-
-    # 4. Optional Federated Read-Only Bridge to Omni-RAG v6
-    if federated:
-        fed_hits = query_omni_rag_federated(query, limit=max(2, top_k), omni_dir=omni_dir)
-        fused.sort(key=lambda x: x["rrf_score"], reverse=True)
-        if fed_hits:
-            # Guarantee balanced blend: keep top local hits + at least 2 federated Omni-RAG v6 hits when available
-            fed_slots = min(len(fed_hits), max(1, top_k // 2))
-            local_slots = max(0, top_k - fed_slots)
-            blended = fused[:local_slots] + fed_hits[:fed_slots]
-            blended.sort(key=lambda x: x["rrf_score"], reverse=True)
-            return blended[:top_k]
-
     fused.sort(key=lambda x: x["rrf_score"], reverse=True)
-    return fused[:top_k]
+
+    if not federated:
+        return fused[:top_k]
+
+    # 4. Federated Read-Only Bridge (Omni-RAG SQLite RO + Qdrant Cloud RO) reranked via TextCrossEncoder
+    fed_pool: list[dict[str, Any]] = list(fused[: max(top_k * 2, 8)])
+    fed_pool.extend(query_omni_rag_federated(query, limit=max(4, top_k), omni_dir=omni_dir))
+    if include_qdrant:
+        fed_pool.extend(query_qdrant_readonly(query, limit=max(3, top_k // 2 + 1), embed_fn=embed_fn))
+
+    if not fed_pool:
+        return []
+
+    dedup_pool: list[dict[str, Any]] = []
+    seen_cids: set[str] = set()
+    for item in fed_pool:
+        cid = str(item["chunk_id"])
+        if cid not in seen_cids:
+            seen_cids.add(cid)
+            dedup_pool.append(item)
+
+    try:
+        docs_for_ce = [f"{h.get('heading', '')}\n{str(h.get('content', ''))[:900]}" for h in dedup_pool]
+        logits = score_cross_encoder(query, docs_for_ce, rerank_fn=rerank_fn)
+        reranked: list[dict[str, Any]] = []
+        for h, logit in zip(dedup_pool, logits, strict=True):
+            if not _passes_domain_guard(h, query, domain, logit):
+                continue
+            item_copy = dict(h)
+            item_copy["rerank_logit"] = round(float(logit), 4)
+            item_copy["rerank_score"] = round(_sigmoid(logit), 6)
+            reranked.append(item_copy)
+        reranked.sort(key=lambda x: (x["rerank_score"], x["rrf_score"]), reverse=True)
+        return reranked[:top_k]
+    except Exception:
+        return fused[:top_k]
 
 
 def format_rag_context(hits: list[dict[str, Any]], max_tokens: int = 550) -> str:
@@ -1065,10 +1544,10 @@ def build_curator_rag_context(
     max_tokens: int = 550,
     db_path: Path = DEFAULT_DB_PATH,
     use_vectors: bool = True,
+    federated: bool = False,
 ) -> str:
     """Retrieve bounded RAG context (streamer profile + episodic winners/errors + craft/CTR rules) for curator.py."""
     hits: list[dict[str, Any]] = []
-    # 1. Streamer profile
     hits.extend(
         query_rag(
             f"{streamer_id} profile hook pacing",
@@ -1078,28 +1557,26 @@ def build_curator_rag_context(
             use_vectors=use_vectors,
         )
     )
-    # 2. Episodic memory (past winners + rejected errors)
     hits.extend(
         query_rag(
             f"{streamer_id} {topic_query} WINNER REJECTED_ERROR",
             domain="episodic_memory",
-            top_k=3,
+            top_k=2,
             db_path=db_path,
             use_vectors=use_vectors,
         )
     )
-    # 3. Domain-specific guidance (editing vs packaging/CTR)
     target_domain = "design_ctr" if stage == "packaging" else "shortform_craft"
     hits.extend(
         query_rag(
             topic_query or "hook retention seamless loop curiosity gap",
             domain=target_domain,
             top_k=2,
+            federated=federated,
             db_path=db_path,
             use_vectors=use_vectors,
         )
     )
-    # Deduplicate by chunk_id while keeping priority order
     seen: set[str] = set()
     unique: list[dict[str, Any]] = []
     for h in hits:
@@ -1119,16 +1596,26 @@ def inspect_rag_status(db_path: Path = DEFAULT_DB_PATH, omni_dir: Path | None = 
         vec_cnt = int(conn.execute("SELECT COUNT(*) FROM rag_chunks_vec").fetchone()[0]) if vec_ok else 0
         dom_rows = conn.execute("SELECT domain, COUNT(*) AS c FROM rag_chunks GROUP BY domain").fetchall()
         domains = {str(r["domain"]): int(r["c"]) for r in dom_rows}
+        skills_cnt = int(
+            conn.execute(
+                "SELECT COUNT(DISTINCT source_path) FROM rag_chunks WHERE source_path LIKE '.agents/skills/%/SKILL.md'"
+            ).fetchone()[0]
+        )
     finally:
         conn.close()
 
-    base_dir = omni_dir or DEFAULT_OMNI_RAG_DIR
+    base_dir = omni_dir or resolve_omni_rag_dir(PROJECT_ROOT)
+    load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
+    qdrant_configured = bool(_resolve_qdrant_url() and (os.getenv("QDRANT_API_KEY") or "").strip())
     return {
         "local_chunks": chunk_cnt,
         "local_vec_chunks": vec_cnt,
+        "skills_indexed": skills_cnt,
         "sqlite_vec_loaded": vec_ok,
         "embedding_model": EMBEDDING_MODEL,
+        "reranker_model": RERANKER_MODEL,
         "domains": domains,
         "federated_omni_rag_hot": (base_dir / "rag_hot.sqlite").is_file(),
         "federated_omni_rag_library": (base_dir / "rag_library.sqlite").is_file(),
+        "qdrant_readonly_configured": qdrant_configured,
     }

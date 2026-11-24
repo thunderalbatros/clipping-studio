@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import statistics
 import subprocess
 import tempfile
@@ -21,8 +20,14 @@ from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.db import insert_telemetry
-from src.llm_router import generate_structured, reset_cached_prefix
-from src.miner import PROJECT_ROOT, _ensure_media_path, find_deno_executable
+from src.llm_router import (
+    build_cached_system_instruction,
+    generate_structured,
+    reset_cached_prefix,
+    wrap_untrusted_source_data,
+)
+from src.miner import PROJECT_ROOT
+from src.runtime_paths import ensure_media_path, find_deno_executable, format_hms, resolve_binary_str
 
 STYLE_DNA_PATH = PROJECT_ROOT / "context" / "viral_style_dna.json"
 _PTS_TIME_RE = re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
@@ -252,20 +257,27 @@ def deconstruct_outlier_multimodal(
         strip = _extract_4frame_strip(video_path, float(metrics.get("duration_sec") or 20.0), Path(tmp) / "strip.png")
         if strip is None:
             return None
+        untrusted_meta = wrap_untrusted_source_data(
+            "external_outlier_metadata",
+            f"platform={platform}\ntitle={title or metrics.get('label')}",
+        )
         prompt = (
-            f"Deconstruct this viral short-form gaming outlier ({platform}).\n"
-            f"Title: {title or metrics.get('label')}\n"
+            "Deconstruct this viral short-form gaming outlier.\n"
+            f"{untrusted_meta}\n"
             f"Deterministic FFmpeg metrics: duration={metrics.get('duration_sec')}s, "
             f"cuts_per_min={metrics.get('cuts_per_min')}, first_cut_sec={metrics.get('first_cut_sec')}s, "
             f"opening_3s_lufs={metrics.get('opening_3s_lufs')} LUFS, estimated_wpm={metrics.get('estimated_wpm')}, "
             f"aspect={metrics.get('aspect')} ({metrics.get('width')}x{metrics.get('height')}).\n"
             "Inspect the attached 4-frame strip (t=0.2s, 1.5s, 3.0s, climax) and return OutlierMultimodalDeconstruction JSON."
         )
+        sys_inst = build_cached_system_instruction(
+            "You are Viral Intelligence Analyst. Return concise empirical OutlierMultimodalDeconstruction JSON only."
+        )
         try:
             res, provider = generate_structured(
                 prompt,
                 OutlierMultimodalDeconstruction,
-                system_instruction="You are Viral Intelligence Analyst. Return concise empirical JSON only.",
+                system_instruction=sys_inst,
                 images=[strip],
                 media_resolution="MEDIA_RESOLUTION_MEDIUM",
             )
@@ -286,11 +298,10 @@ def download_and_analyze_url(
 ) -> dict[str, Any] | None:
     """Download a lightweight sample (<=720p, <=max_sec) of a public viral URL and extract Style DNA."""
     with tempfile.TemporaryDirectory(prefix="steal_dna_") as tmp:
-        _ensure_media_path()
-        ytdlp = str(PROJECT_ROOT / ".venv" / "Scripts" / "yt-dlp.exe")
-        if not Path(ytdlp).is_file():
-            ytdlp = shutil.which("yt-dlp") or "yt-dlp"
+        ensure_media_path()
+        ytdlp = resolve_binary_str("yt-dlp")
         out_tmpl = str(Path(tmp) / "sample.%(ext)s")
+        end_hms = format_hms(max(10, min(180, int(max_sec))))
         cmd = [
             ytdlp,
             "--no-playlist",
@@ -300,7 +311,7 @@ def download_and_analyze_url(
             "--merge-output-format",
             "mp4",
             "--download-sections",
-            f"*00:00:00-00:00:{min(59, max(10, max_sec)):02d}",
+            f"*00:00:00-{end_hms}",
             "-o",
             out_tmpl,
         ]

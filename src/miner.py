@@ -28,6 +28,16 @@ from src.db import (
     upsert_slice,
     upsert_vod,
 )
+from src.runtime_paths import (
+    dir_size_bytes as _dir_size_bytes,
+)
+from src.runtime_paths import (
+    ensure_media_path as _ensure_media_path,
+)
+from src.runtime_paths import (
+    find_deno_executable,
+    resolve_binary_str,
+)
 from src.schemas import CandidateSlice, RunState
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -41,52 +51,6 @@ _TWITCH_SUBGIFT_RE = re.compile(r"(gifted a tier|is gifting \d+|subscribed at ti
 _BYTERANGE_RE = re.compile(r"#EXT-X-BYTERANGE:(\d+)(?:@(\d+))?")
 _RES_RE = re.compile(r"RESOLUTION=(\d+)x(\d+)")
 _BW_RE = re.compile(r"BANDWIDTH=(\d+)")
-
-
-def find_deno_executable() -> Path | None:
-    """Auto-detect `deno.exe` across PATH, user `~/.deno/bin`, and WinGet Packages (handles nested dirs)."""
-    found = shutil.which("deno")
-    if found:
-        return Path(found)
-
-    candidates: list[Path] = [Path.home() / ".deno" / "bin" / "deno.exe"]
-    local_app = os.environ.get("LOCALAPPDATA", "")
-    if local_app:
-        candidates.append(Path(local_app) / "Microsoft" / "WinGet" / "Links" / "deno.exe")
-        pkg_root = Path(local_app) / "Microsoft" / "WinGet" / "Packages"
-        if pkg_root.is_dir():
-            for pkg_dir in pkg_root.glob("DenoLand.Deno*"):
-                direct = pkg_dir / "deno.exe"
-                if direct.is_file():
-                    return direct
-                for nested in pkg_dir.rglob("deno.exe"):
-                    if nested.is_file():
-                        return nested
-    for cand in candidates:
-        if cand.is_file():
-            return cand
-    return None
-
-
-def _ensure_media_path() -> None:
-    """Ensure .venv\\Scripts and auto-detected Deno directory are on PATH for yt-dlp / TwitchDownloaderCLI."""
-    extra_dirs: list[Path] = [PROJECT_ROOT / ".venv" / "Scripts"]
-    deno_exe = find_deno_executable()
-    if deno_exe is not None:
-        extra_dirs.append(deno_exe.parent)
-    local_app = os.environ.get("LOCALAPPDATA", "")
-    if local_app:
-        links = Path(local_app) / "Microsoft" / "WinGet" / "Links"
-        if links.is_dir():
-            extra_dirs.append(links)
-    user_deno = Path.home() / ".deno" / "bin"
-    if user_deno.is_dir():
-        extra_dirs.append(user_deno)
-
-    current = os.environ.get("PATH", "")
-    prefix = [str(p) for p in extra_dirs if p.exists() and str(p) not in current]
-    if prefix:
-        os.environ["PATH"] = os.pathsep.join(prefix) + os.pathsep + current
 
 
 PROTECTED_RUN_SUBDIRS = frozenset({"branding"})
@@ -106,12 +70,6 @@ def validate_run_id(run_id: str, runs_root: Path = RUNS_DIR) -> Path:
     if not target.is_relative_to(base) or target == base:
         raise ValueError(f"Path traversal blocked for run_id={run_id!r}")
     return target
-
-
-def _dir_size_bytes(path: Path) -> int:
-    if not path.exists():
-        return 0
-    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
 
 def measure_runs_usage_mb(runs_root: Path = RUNS_DIR) -> float:
@@ -318,8 +276,7 @@ def detect_platform(url: str) -> Literal["youtube", "twitch", "kick", "local"]:
 
 def _yt_dlp_base_cmd() -> list[str]:
     _ensure_media_path()
-    yt_exe = PROJECT_ROOT / ".venv" / "Scripts" / "yt-dlp.exe"
-    exe = str(yt_exe) if yt_exe.exists() else "yt-dlp"
+    exe = resolve_binary_str("yt-dlp")
     deno_exe = find_deno_executable()
     deno_spec = f"deno:{deno_exe}" if deno_exe is not None else "deno"
     cmd = [exe, "--js-runtimes", deno_spec, "--remote-components", "ejs:github"]
@@ -683,8 +640,7 @@ def _windows_from_twitch_chat(
 ) -> tuple[list[tuple[float, float, float]], str, float]:
     """Mine Twitch chat.json rolling z-score weighted by genuine reaction density (bounded window for mega-VODs)."""
     chat_json = tmp_dir / f"twitch_chat_{vod_id}.json"
-    cli = PROJECT_ROOT / ".venv" / "Scripts" / "TwitchDownloaderCLI.exe"
-    exe = str(cli) if cli.exists() else "TwitchDownloaderCLI"
+    exe = resolve_binary_str("TwitchDownloaderCLI")
 
     # Probe duration cheaply so mega-VODs (>3h) scan a bounded 90-min active gameplay window in <60s
     probed_dur = total_dur

@@ -29,9 +29,9 @@ description: >-
    - **`auto-editor`:** Usar análisis estructurado con `--margin 0.25s` (*Synchresis*) y preservación de silencios dramáticos gaming, con fallback automático al analizador PCM. Soportar `--ab-variants 2` con hash visual distinto.
    - **`FFmpeg` + `libass`:** `Montserrat Black` vía `ass=subs.ass:fontsdir=fonts` desde `cwd` relativo (nunca `C:\...`), `format=nv12` con `h264_qsv` (fallback `libx264 -preset fast -crf 18`), bleeper `0–7.5s`, `loudnorm` 2-pass (`-14.0 LUFS`, `<= -1.0 dBTP`).
    - **Chrome/Edge Headless (`src/design_engine.py`):** Embeber `Montserrat-Black.ttf` en `@font-face` (`data:font/ttf;base64,...`), usar `--headless=new --force-device-scale-factor=1 --hide-scrollbars`, validar dimensiones exactas con `PIL.Image.size` (`(1080, 1920)` y `(1280, 720)`), y aplicar ROI fallback en `birefnet-general-lite` si cobertura de máscara excede `0.72` o baja de `0.04`.
-5. **RAG Local + Puente Federado (`src/rag_engine.py`):**
-   - `runs/studio.db`: `rag_chunks`, `rag_chunks_fts` (BM25) y `rag_chunks_vec` (`sqlite-vec` `float[384]`) fusionados con **RRF ($k=60$)**.
-   - Puente hacia `web-software-factory/.cache/rag_hot.sqlite` y `rag_library.sqlite`: abrir **siempre** con SQLite URI `?mode=ro&immutable=1` (cero `-wal`/`-shm` creados ni bloqueos sobre repos externos) con degradación silenciosa si la ruta no existe.
+5. **RAG 3-Niveles (`chonkie` + `sqlite-vec 0.1.9` + `fastembed` + `qdrant-client` RO):**
+   - `runs/studio.db`: descomposición JSON atómica sin `[:1600]`, chunking markdown con `chonkie.RecursiveChunker`, `7/7` skills indexadas, pre-filtro `domain` en `vec0` y reranker `TextCrossEncoder("Xenova/ms-marco-MiniLM-L-6-v2")`.
+   - Consulta federada selectiva (`--federated`): abre `rag_hot.sqlite` y `rag_library.sqlite` estrictamente con `?mode=ro&immutable=1` + Qdrant Cloud solo lectura (`centinela_knowledge`, `hunthub_omni_rag_v5`) con fallback silencioso a SQLite local.
 
 ## Validación en Runtime (Obligatoria)
 - Verificar todo MP4 con `ffprobe` (`1080x1920`, `yuv420p`, `h264`, `-14 LUFS`, sin freeze en `0.0–1.0s`).

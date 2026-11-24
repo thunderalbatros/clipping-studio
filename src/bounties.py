@@ -9,13 +9,18 @@ geo-locked TikTok/IG campaigns for Argentina-based production.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import ipaddress
 import os
 import re
+import socket
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
+import safehttpx
 from curl_cffi import requests as curl_requests
 from dotenv import load_dotenv
 
@@ -38,6 +43,99 @@ _CPM_RE = re.compile(r"\$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/|per)\s*(?:1k|1,000|k\b|
 _BURN_RE = re.compile(r"([0-9]{1,3}(?:\.[0-9]+)?)\s*%\s*(?:paid|claimed|used|spent|funded|burned)", re.IGNORECASE)
 _MIN_VIEWS_RE = re.compile(r"(?:min(?:imum)?\s*views?[:\s]*)([0-9][0-9,\.]*\s*[km]?)", re.IGNORECASE)
 _URL_IN_TEXT_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+_SOUND_CAMPAIGN_RE = re.compile(
+    r"\b(?:official\s+sound|use\s+(?:this\s+|the\s+)?sound|campaign\s+sound|sync\s+sound)\b",
+    re.IGNORECASE,
+)
+
+_FORBIDDEN_SSRF_HOSTS = frozenset(
+    {
+        "localhost",
+        "localhost.localdomain",
+        "metadata.google.internal",
+        "metadata",
+        "instance-data",
+        "169.254.169.254",
+    }
+)
+
+
+def _is_forbidden_ip(ip_str: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip_str.split("%", 1)[0])
+    except ValueError:
+        return True
+    if (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_reserved
+        or addr.is_unspecified
+    ):
+        return True
+    return not safehttpx.is_public_ip(str(addr))
+
+
+def validate_public_http_url(raw_url: str, *, resolve_dns: bool = True) -> tuple[bool, str]:
+    """Enforce anti-SSRF rules (scheme, credentials, literal private/metadata IPs, and DNS resolution)."""
+    clean = (raw_url or "").strip()
+    if not clean:
+        return False, "empty_url"
+    parsed = urlparse(clean)
+    if parsed.scheme not in {"http", "https"}:
+        return False, f"invalid_scheme:{parsed.scheme}"
+    if parsed.username or parsed.password:
+        return False, "embedded_url_credentials_forbidden"
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not host or host in _FORBIDDEN_SSRF_HOSTS or host.endswith((".localhost", ".local", ".internal")):
+        return False, f"ssrf_forbidden_host:{host or 'empty'}"
+
+    # Literal IPv4 / IPv6 check
+    try:
+        ipaddress.ip_address(host)
+        if _is_forbidden_ip(host):
+            return False, f"ssrf_non_public_ip:{host}"
+        return True, "public_ip_ok"
+    except ValueError:
+        pass
+
+    if resolve_dns:
+        try:
+            infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
+        except OSError:
+            return False, f"dns_resolution_failed:{host}"
+        if not infos:
+            return False, f"dns_empty:{host}"
+        for info in infos:
+            sockaddr = info[4]
+            ip_tok = str(sockaddr[0])
+            if _is_forbidden_ip(ip_tok):
+                return False, f"ssrf_dns_non_public_ip:{ip_tok}"
+
+    return True, "public_url_ok"
+
+
+def fetch_public_url_safe(url: str, timeout: float = 12.0) -> str:
+    """Fetch a public campaign URL via `safehttpx` (blocks SSRF, DNS rebinding, and private redirects)."""
+    ok, reason = validate_public_http_url(url, resolve_dns=True)
+    if not ok:
+        raise ValueError(f"SSRF guard blocked URL ({reason}): {url}")
+
+    async def _do_get() -> Any:
+        return await safehttpx.get(url, timeout=timeout, follow_redirects=True)
+
+    resp: Any
+    try:
+        asyncio.get_running_loop()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            resp = pool.submit(asyncio.run, _do_get()).result()
+    except RuntimeError:
+        resp = asyncio.run(_do_get())
+
+    if int(getattr(resp, "status_code", 0)) != 200:
+        return ""
+    return str(getattr(resp, "text", "") or "")[:8000]
 
 _NOISE_DOMAINS = (
     "youtube.com",
@@ -201,6 +299,9 @@ def is_valid_campaign_record(
 
     if not host or parsed.scheme not in {"http", "https"}:
         return False, f"invalid_url_scheme:{raw_url}"
+    ssrf_ok, ssrf_reason = validate_public_http_url(raw_url, resolve_dns=False)
+    if not ssrf_ok:
+        return False, ssrf_reason
     if any(host == d or host.endswith("." + d) for d in _NOISE_DOMAINS):
         return False, f"noise_domain:{host}"
     if path in {"", "/"}:
@@ -324,6 +425,9 @@ def _serper_search(query: str, num: int = 5) -> list[dict[str, Any]]:
 
 
 def _firecrawl_scrape_markdown(url: str) -> str:
+    ok_ssrf, _ = validate_public_http_url(url, resolve_dns=True)
+    if not ok_ssrf:
+        return ""
     api_key = (os.getenv("FIRECRAWL_API_KEY") or "").strip()
     if not api_key:
         return ""
@@ -480,7 +584,7 @@ def scan_bounties(
                 rejected_noise += 1
                 continue
 
-            audio_pol: AudioPolicy = "sound_campaign" if "sound" in f"{title} {brief}".lower() else "strict_clean"
+            audio_pol: AudioPolicy = "sound_campaign" if _SOUND_CAMPAIGN_RE.search(f"{title} {brief}") else "strict_clean"
             audit = audit_campaign_rules(
                 title=title,
                 brief_text=brief,

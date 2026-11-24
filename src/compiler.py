@@ -268,16 +268,61 @@ def compile_from_studio_db(
     thumbnail_headline: str = "GTA VI CHAOS",
     thumb_source: Path | None = None,
     db_path: Path = DEFAULT_DB_PATH,
+    strict_clean_only: bool = True,
 ) -> dict[str, Any]:
-    """Query media-check-approved clips from `runs/studio.db` and compile into a 16:9 YouTube master."""
-    rows = list_approved_clips(streamer_id=streamer_id, limit=max_clips, db_path=db_path)
+    """Compile approved clips from `runs/studio.db` using native `16:9` `slices.video_path` + `start_trim`/`end_trim`."""
+    rows = list_approved_clips(streamer_id=streamer_id, limit=max_clips * 2, db_path=db_path)
+    slice_map: dict[tuple[str, str], dict[str, Any]] = {}
+    init_db(db_path)
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        for sr in conn.execute("SELECT run_id, slice_id, video_path, dmca_flag FROM slices").fetchall():
+            slice_map[(str(sr["run_id"]), str(sr["slice_id"]))] = dict(sr)
+    finally:
+        conn.close()
+
     specs: list[dict[str, Any]] = []
     for r in rows:
-        mp4 = Path(str(r.get("output_mp4") or ""))
-        if not mp4.exists():
-            continue
+        if len(specs) >= max_clips:
+            break
+        run_id = str(r.get("run_id") or "")
+        slice_id = str(r.get("slice_id") or "")
+        s_info = slice_map.get((run_id, slice_id), {})
+        if strict_clean_only:
+            if int(s_info.get("dmca_flag") or 0) == 1:
+                continue
+            pkg_raw = str(r.get("packaging_json") or "")
+            if pkg_raw:
+                try:
+                    pkg_obj = json.loads(pkg_raw)
+                    if str(pkg_obj.get("audio_policy") or "strict_clean") not in {"strict_clean", ""}:
+                        continue
+                except Exception:
+                    pass
+
         label = str(r.get("matched_lore_entity") or f"{r.get('streamer_id')} {r.get('clip_id')}")
-        specs.append({"path": str(mp4), "label": label})
+        native_slice = Path(str(s_info.get("video_path") or ""))
+        s_trim = float(r.get("start_trim") or 0.0)
+        e_trim = float(r.get("end_trim") or 0.0)
+        if s_info.get("video_path") and native_slice.is_file() and e_trim > s_trim:
+            wb_px = _lookup_webcam_box_in_state(native_slice.parent / "state.json", slice_id)
+            specs.append(
+                {
+                    "path": str(native_slice),
+                    "source_slice_path": str(native_slice),
+                    "start_trim": s_trim,
+                    "end_trim": e_trim,
+                    "webcam_box_px": wb_px,
+                    "label": label,
+                }
+            )
+            continue
+
+        mp4 = Path(str(r.get("output_mp4") or ""))
+        if mp4.is_file():
+            specs.append({"path": str(mp4), "label": label})
+
     return compile_longform_16_9(
         specs,
         out_dir=out_dir,

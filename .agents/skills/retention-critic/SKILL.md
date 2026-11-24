@@ -13,14 +13,14 @@ description: >-
 - Después de cada render de clip `9:16`, portada `cover_9_16.jpg` o miniatura `thumbnail_1280x720.jpg`, y **antes** de aprobar la publicación.
 
 ## Protocolo de Evaluación (Gate de Salida)
-0. **Memoria RAG (`src/rag_engine.py`):** Antes de emitir veto o aprobar portada/clip, consultar `python -m src.cli rag query "<query>" --domain design_ctr` y `--domain episodic_memory` para contrastar métricas históricas y reglas de `design_bible.md`.
+0. **Memoria RAG 3-Niveles + `evals/visual_qa.py` (`pydantic-evals`):** Antes de emitir veto o aprobar portada/clip, consultar `python -m src.cli rag query "<query>" --domain design_ctr --federated` y `--domain episodic_memory`, y ejecutar `python -m evals.visual_qa <clip_mp4>` (`60 fps` CFR, `-14.0 LUFS` vía `ffmpeg-normalize`, `UNIVERSAL_SAFE_BOX_9_16 = [48, 420, 888, 1248]`, `portada != overlay`, y juez VLM `gemini-3.8-flash`).
 1. **Inspección Técnica de Video (`[RUNTIME REAL]` vía `ffmpeg-mcp-lite` / `ffprobe`):**
    - Confirmar resolución exacta `1080x1920` (9:16), `pix_fmt=yuv420p`, FPS constante (30/60), duración objetivo y audio limpio (`-14.0 LUFS`, `<= -1.0 dBTP`).
    - Extraer **4–6 frames clave en PNG/WebP** (`0.2s`, `1.5s`, `3.0s`, medio, pico de acción y cierre `-0.5s`); nunca subir el MP4 completo al VLM salvo fallo crítico.
 2. **Auditoría de Safe-Zones de Video (5 Redes sobre `1080x1920`):**
    - Inspeccionar `*_safezones.png` (`evals/media_check.py`).
    - **Capa Ámbar (TikTok / IG / FB):** `top 180px`, `right 150px`, `bottom 400px` (`450px` en FB). Tarjeta webcam bajo `y = 180` con ojos/boca libres.
-   - **Capa Roja (YT Shorts / Universal 5 redes):** todo subtítulo `Montserrat Black` y callout dentro de `[48..888, 288..1248]`.
+   - **Capa Roja (`UNIVERSAL_SAFE_BOX_9_16` unificada 5 redes):** todo subtítulo `Montserrat Black` y callout dentro de `[48..888, 420..1248]`, y **prohibido duplicar `cover_headline == callout_text`**.
    - **X:** confirmar impacto visual/textual claro en `0.0–0.5s` en autoplay silencioso.
    - **Filtros duros:** `scene_type == "active_gameplay"`, **cero groserías sin bleep/censura OCR en `0.0–7.5s`**, cero tartamudeos de 1 letra y cero subtítulos duplicados de NPCs.
 3. **Gate Visual de Portadas `9:16` y Miniaturas `16:9` (Método C + `seam-gate`):**

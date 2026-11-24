@@ -15,7 +15,7 @@ description: >-
 - Al evaluar CTR potencial, legibilidad móvil (*Squint Test* `160px`), saliencia pre-atentiva FFT y estética anti-AI slop.
 
 ## Protocolo Operativo
-1. **Leer la biblia de diseño:** Consultar [docs/design_bible.md](../../../docs/design_bible.md) y, si se requieren fundamentos de grilla/color, consultar `python -m src.cli rag query "<tema>" --federated` (lectura `?mode=ro&immutable=1` de `Omni-RAG v6`).
+1. **Leer la biblia de diseño y RAG Federado:** Consultar [docs/design_bible.md](../../../docs/design_bible.md) y consultar selectivamente `python -m src.cli rag query "<tema>" --domain design_ctr --federated` (fusionando `studio.db` + `rag_library.sqlite` `?mode=ro&immutable=1` + matrices Qdrant Cloud RO con `TextCrossEncoder`).
 2. **Método C Híbrido en 2 Capas (Vertical `9:16`):**
    - **Prohibido contaminar Frame 0 del MP4:** nunca insertar placas estáticas al inicio del video.
    - **Capa 1 (`select_peak_cover_frame`):** seleccionar el frame pico por nitidez Laplaciana + expresión facial `UltraFace` + energía RMS; emitir `cover_timestamp_ms` (TikTok API / Shorts selector) y `clip_XX_cover_clean.jpg`.

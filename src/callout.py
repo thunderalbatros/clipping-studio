@@ -28,11 +28,15 @@ from typing import Any
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
+from src.runtime_paths import (
+    BUNDLED_FONT_PATH as _BUNDLED_FONT,
+)
+from src.runtime_paths import (
+    find_headless_browser,
+    headless_browser_flags,
+    load_bundled_font,
+)
 from src.schemas import UNIVERSAL_SAFE_BOX_9_16, EditPlan, FreezeFrameSpec
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_BUNDLED_FONT = PROJECT_ROOT / "assets" / "fonts" / "Montserrat-Black.ttf"
-_FALLBACK_FONT = Path(r"C:\Windows\Fonts\seguibl.ttf")
 
 OVERLAY_BAND_W = 1080
 OVERLAY_BAND_H = 440
@@ -42,13 +46,7 @@ OVERLAY_DEFAULT_Y = 678
 
 
 def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    for p in (_BUNDLED_FONT, _FALLBACK_FONT):
-        if p.exists():
-            try:
-                return ImageFont.truetype(str(p), size)
-            except OSError:
-                continue
-    return ImageFont.load_default()
+    return load_bundled_font(size, font_path=_BUNDLED_FONT)
 
 
 def _font_base64() -> str:
@@ -58,8 +56,6 @@ def _font_base64() -> str:
 
 
 def _find_browser_binary() -> Path | None:
-    from src.design_engine import find_headless_browser
-
     return find_headless_browser()
 
 
@@ -457,14 +453,9 @@ def _render_frames_via_chrome_cdp(
     proc = subprocess.Popen(
         [
             str(browser),
-            "--headless=new",
-            "--disable-gpu",
-            "--no-sandbox",
-            "--disable-extensions",
+            *headless_browser_flags(),
             "--disable-background-networking",
             "--mute-audio",
-            "--force-device-scale-factor=1",
-            "--hide-scrollbars",
             f"--window-size={width},{height}",
             f"--remote-debugging-port={port}",
             f"--user-data-dir={user_data_dir}",

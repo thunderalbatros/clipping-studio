@@ -13,7 +13,7 @@ description: >-
 - Al refinar puntos exactos de entrada/salida (`TrimRefiner`), *Seamless Loops*, pausas *Synchresis* y encuadres 9:16.
 
 ## Protocolo Operativo
-1. **Leer biblias y memoria episódica:** Consultar [docs/style_bible.md](../../../docs/style_bible.md), [docs/shortform_and_editing_bible.md](../../../docs/shortform_and_editing_bible.md) y `context/streamer_profiles.json`. Consultar el RAG (`python -m src.cli rag query "<tema>"`) para recuperar Top-3 ganadores y Top-2 errores episódicos antes de cerrar cortes.
+1. **Leer biblias y memoria RAG 3-Niveles:** Consultar [docs/style_bible.md](../../../docs/style_bible.md), [docs/shortform_and_editing_bible.md](../../../docs/shortform_and_editing_bible.md) y `context/streamer_profiles.json` (con fallback a `studio.db#creators`). Consultar `python -m src.cli rag query "<tema>" --domain episodic_memory` (Nivel 1) y, cuando se requieran principios clásicos de cine/montaje/ritmo (*Murch, Block, Chion*), usar selectivamente `--federated` (`rag_library.sqlite` + Qdrant RO rerankeados con `TextCrossEncoder`).
 2. **Montaje Motivado (Walter Murch *Rule of Six* + Bruce Block):**
    - **Jerarquía de Murch:** Emoción (51%) > Historia (23%) > Ritmo (10%) > Trazado Ocular (7%) > Plano 2D (5%) > Espacio 3D (4%). Jamás cortar con metrónomo robótico cada 1.5s–1.8s.
    - **Acción -> Reacción (Frame 0 vivo):** El segundo `0.0` abre en el evento visual o frase detonante, nunca en saludo, preámbulo muerto ni placa estática.

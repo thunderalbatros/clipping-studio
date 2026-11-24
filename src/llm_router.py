@@ -1,14 +1,14 @@
-"""Resilient multimodal structured-output LLM router powered by `pydantic-ai-slim[google,groq]`.
+"""Resilient multimodal structured-output LLM router powered by `pydantic-ai-slim[google,groq]` (v3.6-A).
 
-Architecture (Integrate-over-Build v3.5.2):
-- Primary: Vertex AI (`gemini-3.8-flash` @ `global` -> `gemini-2.5-flash` @ `GCP_LOCATION`) via
-  `GoogleModel` + `GoogleCloudProvider`.
+Architecture (Integrate-over-Build v3.6-A):
+- Primary: Vertex AI (`gemini-3.8-flash` @ `global` -> `gemini-3.5-flash-lite` @ `GCP_LOCATION`) via
+  `GoogleModel` + `GoogleCloudProvider` (zero retired `2.5` models).
 - Fallbacks: `GroqModel` (`openai/gpt-oss-120b`, text-only) and OpenRouter (`OpenAIChatModel` + `OpenAIProvider`).
-- Unified orchestration: `pydantic_ai.Agent` + `FallbackModel` + `NativeOutput(schema)` with real
-  Pydantic v2 validation feedback retries (`retries={"output": max_retries}`).
-- Security & FinOps: `build_cached_system_instruction()` is 100% static/immutable (~4.8k tokens) for
-  Vertex Implicit Caching & Groq TPM safety; all dynamic/untrusted data goes strictly in `user_prompt`
-  inside `<untrusted_source_data>` tags; multimodal attachments use `pydantic_ai.BinaryContent`.
+- Multimodal & FinOps: propagates `media_resolution` (`MediaResolution`) into `GoogleModelSettings` and supports
+  opt-in Batch/Flex PayGo (`service_tier="flex"`, `google_cloud_service_tier="flex_only"`, `-50%` cost) for
+  non-interactive workloads ahead of `2027-01-01` pricing.
+- Security: `build_cached_system_instruction()` is 100% static/immutable (~4.8k tokens) for Vertex Implicit Caching
+  & Groq TPM safety; all dynamic/untrusted data goes strictly in `user_prompt` inside `<untrusted_source_data>`.
 """
 
 from __future__ import annotations
@@ -20,16 +20,17 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from dotenv import load_dotenv
+from google.genai.types import MediaResolution
 from pydantic import BaseModel
 from pydantic_ai import Agent, BinaryContent, NativeOutput, UnexpectedModelBehavior
 from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.messages import UserContent
 from pydantic_ai.models import Model
 from pydantic_ai.models.fallback import FallbackModel
-from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
+from pydantic_ai.models.google import GoogleCloudServiceTier, GoogleModel, GoogleModelSettings
 from pydantic_ai.models.groq import GroqModel, GroqModelSettings
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.google_cloud import GoogleCloudProvider
@@ -40,6 +41,7 @@ from pydantic_ai.settings import ModelSettings
 from src.db import get_daily_llm_spend_usd, insert_telemetry
 
 T = TypeVar("T", bound=BaseModel)
+ServiceTierChoice = Literal["standard", "flex", "batch"]
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DOTENV_LOADED = False
@@ -47,6 +49,40 @@ _STATIC_BIBLE_PREFIX: str | None = None
 _VERTEX_PROVIDERS: dict[tuple[str, str], GoogleCloudProvider] = {}
 
 ImageAttachment = bytes | Path | str | tuple[bytes | Path | str, str]
+
+_MEDIA_RESOLUTION_MAP: dict[str, MediaResolution] = {
+    "MEDIA_RESOLUTION_LOW": MediaResolution.MEDIA_RESOLUTION_LOW,
+    "LOW": MediaResolution.MEDIA_RESOLUTION_LOW,
+    "MEDIA_RESOLUTION_MEDIUM": MediaResolution.MEDIA_RESOLUTION_MEDIUM,
+    "MEDIUM": MediaResolution.MEDIA_RESOLUTION_MEDIUM,
+    "MEDIA_RESOLUTION_HIGH": MediaResolution.MEDIA_RESOLUTION_HIGH,
+    "HIGH": MediaResolution.MEDIA_RESOLUTION_HIGH,
+}
+
+
+def _resolve_media_resolution(raw: str | MediaResolution | None) -> MediaResolution | None:
+    if raw is None:
+        return None
+    if isinstance(raw, MediaResolution):
+        return raw
+    key = str(raw).strip().upper()
+    if not key:
+        return None
+    if key in _MEDIA_RESOLUTION_MAP:
+        return _MEDIA_RESOLUTION_MAP[key]
+    try:
+        return MediaResolution(key)
+    except ValueError:
+        return MediaResolution.MEDIA_RESOLUTION_HIGH
+
+
+def _resolve_service_tier(explicit: ServiceTierChoice | str | None = None) -> ServiceTierChoice:
+    raw = (explicit or os.getenv("VERTEX_SERVICE_TIER") or "standard").strip().lower()
+    if raw in {"flex", "flex_only", "pt_then_flex"}:
+        return "flex"
+    if raw == "batch":
+        return "batch"
+    return "standard"
 
 
 def _ensure_dotenv() -> None:
@@ -73,10 +109,26 @@ def _get_vertex_provider(project: str, location: str) -> GoogleCloudProvider:
     return _VERTEX_PROVIDERS[key]
 
 
-def _estimate_vertex_cost_usd(prompt_tokens: int, cached_tokens: int, output_tokens: int) -> float:
-    """Estimate USD cost using Gemini 3.8 Flash rates ($0.75/1M uncached in, $0.075/1M cached in, $3.75/1M out)."""
+def _estimate_vertex_cost_usd(
+    prompt_tokens: int,
+    cached_tokens: int,
+    output_tokens: int,
+    *,
+    model_name: str = "gemini-3.8-flash",
+    service_tier: ServiceTierChoice = "standard",
+) -> float:
+    """Estimate USD cost using Gemini 3.8 Flash / 3.5 Flash-Lite rates, applying `-50%` on Batch/Flex tiers."""
     uncached = max(0, prompt_tokens - cached_tokens)
-    return round((uncached * 0.75 + cached_tokens * 0.075 + output_tokens * 3.75) / 1_000_000.0, 6)
+    is_lite = "lite" in (model_name or "").lower()
+    in_rate = 0.20 if is_lite else 0.75
+    cache_rate = 0.02 if is_lite else 0.075
+    out_rate = 0.80 if is_lite else 3.75
+    discount = 0.50 if service_tier in {"flex", "batch"} else 1.0
+    return round(
+        ((uncached * in_rate * discount) + (cached_tokens * cache_rate) + (output_tokens * out_rate * discount))
+        / 1_000_000.0,
+        6,
+    )
 
 
 def reset_cached_prefix() -> None:
@@ -158,19 +210,43 @@ def _vertex_candidates() -> list[tuple[str, str]]:
     env_loc = os.getenv("GCP_LOCATION", "us-central1").strip() or "us-central1"
     env_model = os.getenv("GEMINI_MODEL", "").strip()
     candidates: list[tuple[str, str]] = []
-    if env_model and env_model not in {"gemini-3.8-flash", "gemini-2.5-flash", "gemini-4-flash"}:
+    # Never route to retired 2.5 models; prioritize gemini-3.8-flash @ global -> gemini-3.5-flash-lite @ regional
+    if (
+        env_model
+        and not env_model.startswith("gemini-2.")
+        and env_model not in {"gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-flash"}
+    ):
         candidates.append((env_model, "global"))
         candidates.append((env_model, env_loc))
-    for item in [("gemini-3.8-flash", "global"), ("gemini-2.5-flash", env_loc)]:
+    for item in [("gemini-3.8-flash", "global"), ("gemini-3.5-flash-lite", env_loc)]:
         if item not in candidates:
             candidates.append(item)
     return candidates
+
+
+def build_google_model_settings(
+    *,
+    temperature: float = 0.2,
+    media_resolution: str | MediaResolution | None = "MEDIA_RESOLUTION_HIGH",
+    service_tier: ServiceTierChoice = "standard",
+) -> GoogleModelSettings:
+    """Construct `GoogleModelSettings` with explicit `google_video_resolution` and optional Flex/Batch tier."""
+    settings: GoogleModelSettings = GoogleModelSettings(temperature=temperature)
+    resolved_res = _resolve_media_resolution(media_resolution)
+    if resolved_res is not None:
+        settings["google_video_resolution"] = resolved_res
+    if service_tier in {"flex", "batch"}:
+        cloud_tier: GoogleCloudServiceTier = "flex_only"
+        settings["google_cloud_service_tier"] = cloud_tier
+    return settings
 
 
 def _build_provider_models(
     provider: str,
     *,
     has_images: bool = False,
+    media_resolution: str | MediaResolution | None = "MEDIA_RESOLUTION_HIGH",
+    service_tier: ServiceTierChoice = "standard",
 ) -> list[Model]:
     """Instantiate configured `pydantic_ai` models for a named provider (returns empty list if unavailable)."""
     if provider == "vertex_ai":
@@ -185,7 +261,11 @@ def _build_provider_models(
                 f"(${spent_today:.4f} >= ${daily_cap:.2f}); skipping vertex_ai."
             )
             return []
-        settings = GoogleModelSettings(temperature=0.2)
+        settings = build_google_model_settings(
+            temperature=0.2,
+            media_resolution=media_resolution,
+            service_tier=service_tier,
+        )
         models: list[Model] = []
         for model_name, location in _vertex_candidates():
             models.append(
@@ -218,7 +298,9 @@ def _build_provider_models(
         api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
         if not api_key:
             return []
-        or_model = os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-flash").strip() or "google/gemini-2.5-flash"
+        or_model = os.getenv("OPENROUTER_MODEL", "").strip()
+        if not or_model or "2.5" in or_model:
+            or_model = "google/gemini-3.8-flash"
         return [
             OpenAIChatModel(
                 or_model,
@@ -234,12 +316,19 @@ def build_router_model(
     providers_order: list[str],
     *,
     has_images: bool = False,
+    media_resolution: str | MediaResolution | None = "MEDIA_RESOLUTION_HIGH",
+    service_tier: ServiceTierChoice = "standard",
 ) -> Model:
     """Build a unified `pydantic_ai` `FallbackModel` chain from ordered provider names."""
     chain: list[Model] = []
     skipped: list[str] = []
     for prov in providers_order:
-        built = _build_provider_models(prov, has_images=has_images)
+        built = _build_provider_models(
+            prov,
+            has_images=has_images,
+            media_resolution=media_resolution,
+            service_tier=service_tier,
+        )
         if built:
             chain.extend(built)
         else:
@@ -305,20 +394,26 @@ def generate_structured(
     images: list[ImageAttachment] | None = None,
     media_resolution: str = "MEDIA_RESOLUTION_HIGH",
     *,
+    service_tier: ServiceTierChoice | None = None,
     model_override: Model | None = None,
 ) -> tuple[T, str]:
     """Generate a Pydantic v2 validated object using `pydantic_ai.Agent` + `FallbackModel` + `NativeOutput`."""
-    _ = media_resolution  # Preserved for backward signature compatibility with multimodal callers.
     os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
     _ensure_dotenv()
 
+    eff_tier = _resolve_service_tier(service_tier)
     has_images = bool(images)
     if model_override is not None:
         selected_model: Model = model_override
     else:
         default_order = ["vertex_ai", "openrouter"] if has_images else ["vertex_ai", "groq", "openrouter"]
         order = [force_provider] if force_provider else (providers_order or default_order)
-        selected_model = build_router_model(order, has_images=has_images)
+        selected_model = build_router_model(
+            order,
+            has_images=has_images,
+            media_resolution=media_resolution,
+            service_tier=eff_tier,
+        )
 
     output_spec: Any = NativeOutput(response_model) if _supports_native_output(selected_model) else response_model
     agent: Agent[None, T] = Agent(
@@ -346,13 +441,22 @@ def generate_structured(
     output_toks = int(getattr(usage, "output_tokens", 0) or 0)
 
     if provider_label.startswith("vertex_ai:"):
-        est_usd = _estimate_vertex_cost_usd(prompt_toks, cached_toks, output_toks)
+        eff_model_name = res_model or "gemini-3.8-flash"
+        est_usd = _estimate_vertex_cost_usd(
+            prompt_toks,
+            cached_toks,
+            output_toks,
+            model_name=eff_model_name,
+            service_tier=eff_tier,
+        )
         insert_telemetry(
             "llm_router",
             "llm_usage",
             {
                 "provider": "vertex_ai",
-                "model": res_model or "gemini-3.8-flash",
+                "model": eff_model_name,
+                "service_tier": eff_tier,
+                "media_resolution": media_resolution if has_images else None,
                 "prompt_tokens": prompt_toks,
                 "cached_tokens": cached_toks,
                 "output_tokens": output_toks,
@@ -362,7 +466,7 @@ def generate_structured(
             },
         )
         print(
-            f"[LLM_ROUTER] engine=pydantic_ai provider=vertex_ai model={res_model} "
+            f"[LLM_ROUTER] engine=pydantic_ai provider=vertex_ai model={eff_model_name} tier={eff_tier} "
             f"latency_ms={latency_ms} prompt_tokens={prompt_toks} cached_tokens={cached_toks or None} "
             f"est_usd=${est_usd:.5f} status=OK"
         )

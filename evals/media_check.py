@@ -19,7 +19,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
+
+from src.runtime_paths import load_bundled_font, resolve_binary_str
+from src.schemas import UNIVERSAL_SAFE_BOX_9_16
 
 _BLACK_START_RE = re.compile(r"black_start:(\d+(?:\.\d+)?)")
 _FREEZE_START_RE = re.compile(r"freeze_start:\s*(\d+(?:\.\d+)?)")
@@ -31,10 +34,20 @@ def _run_cmd(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
-def check_ffprobe_spec(video_path: Path) -> dict[str, Any]:
-    """Check 1080x1920, h264, yuv420p, audio stream, and A/V sync."""
+def _parse_fps(raw: str | None) -> float:
+    if not raw:
+        return 0.0
+    if "/" in raw:
+        num_s, den_s = raw.split("/", 1)
+        den = float(den_s or 0.0)
+        return round(float(num_s) / den, 2) if den > 0 else 0.0
+    return round(float(raw), 2)
+
+
+def check_ffprobe_spec(video_path: Path, expected_fps: float | None = None) -> dict[str, Any]:
+    """Check 1080x1920, h264, yuv420p, CFR consistency, audio stream, and A/V sync."""
     res = _run_cmd([
-        "ffprobe",
+        resolve_binary_str("ffprobe"),
         "-v",
         "error",
         "-show_format",
@@ -57,6 +70,11 @@ def check_ffprobe_spec(video_path: Path) -> dict[str, Any]:
     height = int(v_stream.get("height", 0))
     codec = v_stream.get("codec_name")
     pix_fmt = v_stream.get("pix_fmt")
+    r_fps = _parse_fps(str(v_stream.get("r_frame_rate") or ""))
+    avg_fps = _parse_fps(str(v_stream.get("avg_frame_rate") or ""))
+    is_cfr = r_fps > 0.0 and avg_fps > 0.0 and abs(r_fps - avg_fps) <= 0.03
+    fps_ok = is_cfr and (expected_fps is None or abs(avg_fps - expected_fps) <= 0.05)
+
     fmt_dur = float(data.get("format", {}).get("duration") or 0.0)
     v_dur = float(v_stream.get("duration") or fmt_dur)
     a_dur = float(a_stream.get("duration") or fmt_dur)
@@ -69,6 +87,7 @@ def check_ffprobe_spec(video_path: Path) -> dict[str, Any]:
         and pix_fmt == "yuv420p"
         and fmt_dur > 0.5
         and av_diff <= 0.30
+        and fps_ok
     )
     return {
         "passed": passed,
@@ -76,6 +95,9 @@ def check_ffprobe_spec(video_path: Path) -> dict[str, Any]:
         "height": height,
         "codec": codec,
         "pix_fmt": pix_fmt,
+        "r_fps": r_fps,
+        "avg_fps": avg_fps,
+        "is_cfr": is_cfr,
         "duration_sec": round(fmt_dur, 3),
         "av_diff_sec": round(av_diff, 3),
     }
@@ -161,12 +183,14 @@ def draw_safezones_overlay(frame_png: Path, out_png: Path) -> Path:
         amber_mask,
     )
 
-    # Capa Roja (YouTube Shorts / Universal 3 redes): top 288px, right 192px, bottom 672px, left 48px.
-    red_top = round(288 * (h / 1920.0))
-    red_right = round(192 * (w / 1080.0))
-    red_bot = round(672 * (h / 1920.0))
-    red_left = round(48 * (w / 1080.0))
-    safe_box = [red_left, red_top, w - red_right, h - red_bot]
+    # Capa Roja (Single Source of Truth UNIVERSAL_SAFE_BOX_9_16 = [48, 420, 888, 1248]).
+    sx1, sy1, sx2, sy2 = UNIVERSAL_SAFE_BOX_9_16
+    safe_box = [
+        round(sx1 * (w / 1080.0)),
+        round(sy1 * (h / 1920.0)),
+        round(sx2 * (w / 1080.0)),
+        round(sy2 * (h / 1920.0)),
+    ]
 
     red_mask = Image.new("L", (w, h), 0)
     rdraw = ImageDraw.Draw(red_mask)
@@ -186,15 +210,11 @@ def draw_safezones_overlay(frame_png: Path, out_png: Path) -> Path:
     draw.rectangle([0, amber_top, w - amber_right, h - amber_bot], outline=(255, 195, 0, 225), width=2)
     draw.rectangle(safe_box, outline=(255, 65, 65, 240), width=4)
 
-    font_path = Path(r"C:\Windows\Fonts\seguibl.ttf")
-    try:
-        font = ImageFont.truetype(str(font_path), 24) if font_path.exists() else ImageFont.load_default()
-    except OSError:
-        font = ImageFont.load_default()
+    font = load_bundled_font(22)
     draw.rectangle([28, 24, w - 28, 76], fill=(10, 12, 16, 210))
     draw.text(
         (42, 36),
-        "AMBER: TikTok/Reels | RED SAFE BOX [48..888, 288..1248]: 3-Network",
+        f"AMBER: TikTok/Reels | RED SAFE BOX [{sx1}..{sx2}, {sy1}..{sy2}]: 4-Network",
         fill=(255, 240, 200, 255),
         font=font,
     )
@@ -246,13 +266,18 @@ def extract_qa_frames_png(video_path: Path, duration_sec: float, qa_dir: Path) -
     }
 
 
-def evaluate_video(video_path: Path, qa_dir: Path | None = None, allow_freeze_start: bool = False) -> dict[str, Any]:
+def evaluate_video(
+    video_path: Path,
+    qa_dir: Path | None = None,
+    allow_freeze_start: bool = False,
+    expected_fps: float | None = None,
+) -> dict[str, Any]:
     """Run all 4 binary Media Runtime Evals and return structured verdict."""
     if not video_path.exists():
         return {"passed": False, "error": f"File not found: {video_path}"}
 
     target_qa_dir = qa_dir or (video_path.parent / f"{video_path.stem}_qa_frames")
-    c1 = check_ffprobe_spec(video_path)
+    c1 = check_ffprobe_spec(video_path, expected_fps=expected_fps)
     c2 = check_opening_integrity(video_path, allow_freeze_start=allow_freeze_start)
     c3 = check_loudness_ebur128(video_path)
     dur = float(c1.get("duration_sec") or 1.0)

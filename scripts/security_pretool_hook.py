@@ -50,6 +50,18 @@ _SHELL_SECRET_DUMP_PATTERNS = (
     re.compile(r"\b(?:printenv|get-childitem\s+env:|gci\s+env:|ls\s+env:|dir\s+env:)\b", re.IGNORECASE),
 )
 
+_PYTHON_INLINE_RE = re.compile(
+    r"(?:^|[;|&\s\"'\\/])(?:python(?:\d+(?:\.\d+)?)?|py)(?:\.exe)?(?:\s+[^\r\n;|&]*?)?\s+-c\b",
+    re.IGNORECASE,
+)
+_PYTHON_INLINE_FORBIDDEN_RE = re.compile(
+    r"(?:\bos\.environ\b|\bos\.getenv\b|\bdotenv_values\b|\bload_dotenv\b|"
+    r"\bwrite_text\b|\bwrite_bytes\b|\bunlink\b|\bshutil\.rmtree\b|\bshutil\.move\b|\bshutil\.copy|"
+    r"\bos\.remove\b|\bos\.unlink\b|\bos\.rename\b|\bos\.replace\b|"
+    r"\bopen\s*\([^)]*,\s*['\"][wa+])",
+    re.IGNORECASE,
+)
+
 _SHELL_WRITE_VERBS_RE = re.compile(
     r"(?:>>|(?<![0-9&])>(?!\s*(?:\$null|/dev/null|nul\b))|\b(?:out-file|set-content|add-content|move-item|copy-item|remove-item|new-item|rm|del|erase|mv|cp|xcopy|robocopy|mkdir|rmdir|shutil\.move|shutil\.copy|write_text|write_bytes)\b)",
     re.IGNORECASE,
@@ -127,6 +139,13 @@ def _check_shell_command(command_line: str, ws_root: Path, cwd: Path) -> dict[st
                 "reason": "Security Guard (Regla 01): blocked shell command attempting to read/dump .env, cookies, or environment secrets.",
             }
 
+    # 1b. Block inline `python -c` commands that read os.environ/dotenv or mutate files
+    if _PYTHON_INLINE_RE.search(cmd) and _PYTHON_INLINE_FORBIDDEN_RE.search(cmd):
+        return {
+            "decision": "deny",
+            "reason": "Security Guard (Regla 01): blocked inline `python -c` command attempting to read os.environ/dotenv or mutate files.",
+        }
+
     # 2. Block writes/mutations targeting forbidden external paths or paths outside workspace
     if _SHELL_WRITE_VERBS_RE.search(cmd):
         frag = _has_forbidden_external_fragment(cmd)
@@ -171,13 +190,27 @@ def evaluate_security_payload(
     raw_cwd = str(payload.get("cwd") or "").strip()
     cwd = Path(raw_cwd).resolve(strict=False) if raw_cwd else ws_root
 
-    # 1. File read tools: block secrets (.env, *cookies*.txt, credentials)
+    # 1. File read tools: block secrets (.env, *cookies*.txt, credentials) AND any path outside workspace root
     if tool_name in {"read_file", "view_file"}:
         target_raw = str(args.get("Path") or args.get("AbsolutePath") or args.get("path") or "")
-        if target_raw and _is_secret_path(target_raw):
+        if not target_raw:
+            return {"decision": "allow"}
+        if _is_secret_path(target_raw):
             return {
                 "decision": "deny",
                 "reason": f"Security Guard (Regla 01): blocked read access to secret file ({Path(target_raw).name}).",
+            }
+        frag = _has_forbidden_external_fragment(target_raw)
+        if frag:
+            return {
+                "decision": "deny",
+                "reason": f"Security Guard (Regla 01): blocked read access to protected external path ({frag}).",
+            }
+        resolved = _resolve_target_path(target_raw, cwd)
+        if not _is_within_root(resolved, ws_root):
+            return {
+                "decision": "deny",
+                "reason": f"Security Guard (Regla 01): blocked read_file outside workspace ({resolved}).",
             }
         return {"decision": "allow"}
 

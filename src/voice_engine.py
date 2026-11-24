@@ -18,7 +18,7 @@ from typing import Any
 
 COMMERCIAL_TTS_MODELS: dict[str, dict[str, str]] = {
     "kokoro-82m": {"license": "Apache-2.0", "backend": "kokoro_onnx", "status": "approved_commercial"},
-    "pocket-tts": {"license": "MIT", "backend": "pocket_tts", "status": "approved_commercial"},
+    "pocket-tts": {"license": "CC-BY-4.0", "backend": "pocket_tts", "status": "approved_commercial_with_attribution"},
 }
 
 BLOCKED_NC_MODELS = (

@@ -19,7 +19,6 @@ import json
 import math
 import os
 import re
-import shutil
 import statistics
 import subprocess
 import tempfile
@@ -41,15 +40,23 @@ from src.db import (
     insert_telemetry,
     upsert_scene_blueprint,
 )
-from src.llm_router import generate_structured
-from src.miner import PROJECT_ROOT, _ensure_media_path, fetch_kick_gta6_clips, find_deno_executable, load_whitelist
+from src.llm_router import build_cached_system_instruction, generate_structured, wrap_untrusted_source_data
+from src.miner import PROJECT_ROOT, fetch_kick_gta6_clips, load_whitelist
 from src.rag_engine import query_rag
 from src.renderer import detect_scene_cuts_pyscenedetect
+from src.runtime_paths import (
+    ensure_media_path,
+    find_deno_executable,
+    format_hms,
+    resolve_binary_str,
+)
+from src.runtime_paths import (
+    parse_iso_duration_sec as _parse_iso_duration_sec,
+)
 from src.schemas import AnnotatedTranscript, SceneBlueprint, SceneReferenceItem
 from src.speaker_guard import detect_faces_ultraface
 from src.style_analyzer import STYLE_DNA_PATH, analyze_video_style
 
-_ISO_DUR_RE = re.compile(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?")
 _STOPWORDS = frozenset(
     {
         "the",
@@ -184,16 +191,6 @@ class _SceneRefMultimodalAudit(BaseModel):
     title_cover_technique: str = Field(max_length=160)
     intro_0_3s: str = Field(max_length=160)
     outro_structure: str = Field(max_length=160)
-
-
-def _parse_iso_duration_sec(iso: str) -> float:
-    m = _ISO_DUR_RE.match(iso or "")
-    if not m:
-        return 0.0
-    h = int(m.group(1) or 0)
-    mins = int(m.group(2) or 0)
-    s = int(m.group(3) or 0)
-    return float(h * 3600 + mins * 60 + s)
 
 
 def make_scene_key(game: str, scene_query: str) -> str:
@@ -350,10 +347,8 @@ def search_youtube_shorts_for_scene(
 
     # Fallback via yt-dlp + Deno (still real YouTube search, zero API quota needed)
     try:
-        _ensure_media_path()
-        ytdlp = str(PROJECT_ROOT / ".venv" / "Scripts" / "yt-dlp.exe")
-        if not Path(ytdlp).is_file():
-            ytdlp = shutil.which("yt-dlp") or "yt-dlp"
+        ensure_media_path()
+        ytdlp = resolve_binary_str("yt-dlp")
         deno_exe = find_deno_executable()
         deno_spec = f"deno:{deno_exe}" if deno_exe is not None else "deno"
         res = subprocess.run(
@@ -379,6 +374,7 @@ def search_youtube_shorts_for_scene(
         if res.returncode == 0 and res.stdout.strip():
             data = json.loads(res.stdout)
             seen_ids = {c["source_id"] for c in candidates}
+            now_dt = datetime.now(UTC)
             for ent in data.get("entries") or []:
                 vid = str(ent.get("id") or "")
                 if not vid or vid in seen_ids:
@@ -387,6 +383,19 @@ def search_youtube_shorts_for_scene(
                 if dur <= 0.0 or dur > max_duration_sec:
                     continue
                 views = int(ent.get("view_count") or 0)
+                vph = 0.0
+                ts_val = ent.get("timestamp") or ent.get("release_timestamp")
+                up_date = str(ent.get("upload_date") or "").strip()
+                if ts_val:
+                    age_h = max(0.5, (now_dt.timestamp() - float(ts_val)) / 3600.0)
+                    vph = round(views / age_h, 1)
+                elif len(up_date) == 8 and up_date.isdigit():
+                    try:
+                        dt_up = datetime.strptime(up_date, "%Y%m%d").replace(tzinfo=UTC)
+                        age_h = max(1.0, (now_dt - dt_up).total_seconds() / 3600.0)
+                        vph = round(views / age_h, 1)
+                    except ValueError:
+                        vph = 0.0
                 candidates.append(
                     {
                         "platform": "youtube_shorts",
@@ -398,7 +407,7 @@ def search_youtube_shorts_for_scene(
                         "views": views,
                         "likes": int(ent.get("like_count") or 0),
                         "comments": int(ent.get("comment_count") or 0),
-                        "views_per_hour": round(views / 48.0, 1),
+                        "views_per_hour": vph,
                     }
                 )
                 seen_ids.add(vid)
@@ -582,11 +591,10 @@ def deconstruct_reference_video(
 
     with tempfile.TemporaryDirectory(prefix="cs_scref_") as tmp:
         tmp_dir = Path(tmp)
-        _ensure_media_path()
-        ytdlp = str(PROJECT_ROOT / ".venv" / "Scripts" / "yt-dlp.exe")
-        if not Path(ytdlp).is_file():
-            ytdlp = shutil.which("yt-dlp") or "yt-dlp"
+        ensure_media_path()
+        ytdlp = resolve_binary_str("yt-dlp")
         out_tmpl = str(tmp_dir / "ref.%(ext)s")
+        end_hms = format_hms(max(12, min(180, int(max_sec))))
         cmd = [
             ytdlp,
             "--no-playlist",
@@ -596,7 +604,7 @@ def deconstruct_reference_video(
             "--merge-output-format",
             "mp4",
             "--download-sections",
-            f"*00:00:00-00:00:{min(60, max(12, max_sec)):02d}",
+            f"*00:00:00-{end_hms}",
             "-o",
             out_tmpl,
         ]
@@ -637,9 +645,13 @@ def deconstruct_reference_video(
         if use_multimodal:
             strip = _extract_4frame_contact_strip(vid_path, dur, tmp_dir / "strip.png")
             if strip is not None:
+                untrusted_ref = wrap_untrusted_source_data(
+                    "external_scene_reference",
+                    f"platform={cand.get('platform')}\nchannel={cand.get('channel')}\ntitle={cand.get('title')}",
+                )
                 prompt = (
-                    f"Deconstruct this viral short-form reference ({cand.get('platform')}).\n"
-                    f"Title: {cand.get('title')}\n"
+                    "Deconstruct this viral short-form reference.\n"
+                    f"{untrusted_ref}\n"
                     f"Metrics: views={cand.get('views')}, likes={cand.get('likes')}, comments={cand.get('comments')}, "
                     f"vph={cand.get('views_per_hour')}, outlier_ratio={outlier_ratio:.2f}x.\n"
                     f"Deterministic telemetry: duration={dur:.1f}s, cuts={cuts_count} ({cuts_per_min}/min), "
@@ -647,11 +659,14 @@ def deconstruct_reference_video(
                     f"ultraface_camera={cam_pos} (area_ratio={cam_ratio:.2f}).\n"
                     "Inspect the 4-frame strip (0.2s, 1.5s, 3.0s, outro) and return _SceneRefMultimodalAudit JSON."
                 )
+                sys_inst = build_cached_system_instruction(
+                    "You are Senior Viral Intelligence Analyst. Return concise empirical _SceneRefMultimodalAudit JSON."
+                )
                 try:
                     mm_obj, _ = generate_structured(
                         prompt,
                         _SceneRefMultimodalAudit,
-                        system_instruction="You are Senior Viral Intelligence Analyst. Return concise empirical JSON.",
+                        system_instruction=sys_inst,
                         images=[strip],
                         media_resolution="MEDIA_RESOLUTION_MEDIUM",
                     )

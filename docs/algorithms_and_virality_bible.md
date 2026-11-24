@@ -136,8 +136,23 @@
    - **Simple** (1 sola idea/conflicto por clip), **Unexpected** (violación de expectativa en `0–3s` para detener el scroll), **Concrete** (hecho visual tangible: una apuesta, una explosión, un contador, nunca abstracciones), **Credible** (reacción humana real sin guion falso), **Emotional** (alta activación: asombro, risa, incredulidad -> dispara *Shares/Copy Link*), **Stories** (micro-arco completo).
 3. **Daniel Kahneman — *Thinking, Fast and Slow* (Sistema 1 vs. Sistema 2 y *Cognitive Ease*):**
    - En scroll rápido opera **Sistema 1** (automático, visual, sin esfuerzo). Si el espectador necesita activar **Sistema 2** para descifrar un subtítulo largo, un encuadre confuso o una jerga privada del chat, **desliza en `<1.5s`**. Por eso exigimos nivel de lectura de 5.º grado, `<= 3` palabras por golpe, contraste `APCA >= 75` y máximo `2–3` anclas visuales.
-4. **Jonah Berger — *Contagious* (STEPPS):** *Social Currency*, *Triggers*, *High-Arousal Emotion* (risa, shock, asombro -> combustible de *Sends Per Reach* en IG y *ShareViaCopyLink* en X).
+4. **Jonah Berger — *Contagious* (6 Principios STEPPS Completos + Cambio Inesperado):**
+   - **Social Currency** (hacer que quien comparte luzca informado/divertido ante su grupo: *"Mirá la física secreta de GTA VI antes que todos"*), **Triggers** (anclar el clip a estímulos cotidianos frecuentes del jugador), **Emotion** (solo emociones de **alta activación fisiológica**: asombro, risa explosiva, indignación benigna, sorpresa — jamás tristeza pasiva; motor primario de *Sends Per Reach* en IG y *ShareViaCopyLink* en X), **Public** (señales visuales imitables/reconocibles al instante en feed mute), **Practical Value** (truco, ubicación exacta o mecánica replicable en `<30s`), **Stories** (caballo de Troya narrativo donde el mensaje viaja dentro del conflicto). Sumar siempre un **cambio inesperado de valencia o expectativa** a mitad del clip para reactivar dopamina.
 5. **Nir Eyal (*Hooked*) & Celia Hodent (*The Gamer's Brain*):** Carga cognitiva mínima + recompensa variable en el cierre.
+
+### 6.3 Actualizaciones Algorítmicas y de Compliance Q3–Q4 2026 (Delta Crítico Verificado)
+1. **YouTube Shorts — "Anti-Clipper Update" (`2026-10-01`) + Señales Negativas (`2026-06-25`) + *Engaged Views* (`2026-08-24`):**
+   - **Penalización `-40%` a `-80%` de alcance** sobre recortes crudos de streams/podcasts con solo subtítulos automáticos. Para calificar como transformativo, cada clip exige composición multicapa real (encuadre facial reactivo curado + *motion graphics* editoriales motivados + diseño sonoro `riser`/`whoosh` con *sidechain* + recorte de aire muerto con *Synchresis*).
+   - Las señales negativas explícitas (*"Don't recommend channel"*, swipe rápido `<1.5s` repetido, *Dislike* temprano) reciben peso multiplicador severo desde el `25 jun 2026`; y desde el `24 ago 2026` toda elegibilidad YPP / Shorts Pool audita estrictamente **Engaged Views** netas (descartando loops pasivos artificiales).
+2. **Whop Content Rewards Fall 2026 (`Bot Score 0–100` + *Pool Velocity*):**
+   - Auditoría antifraude automática por clip (`Bot Score 0–100`): picos anómalos vista/like, tráfico datacenter o *pods* congelan pagos y banean la cuenta. Priorizar campañas con **burn rate `20%–80%`** y alta *pool velocity* verificada, con distribución 100% orgánica desde IP residencial limpia.
+3. **TikTok US Oracle / *Follower-First* + *Likeness Detection* & C2PA (`2026-11-20`):**
+   - En EE. UU. (infraestructura Oracle), el lote semilla pondera primero retención y *shares* en seguidores/audiencia afín antes de abrir FYF masivo. Desde el `20 nov 2026`, *Likeness Detection* + metadatos **C2PA** desmonetizan o suprimen clones de voz/rostro no declarados -> mantener **`voice_mode="none"`** (voz real intacta del streamer) en Bounties CPM.
+4. **Meta Andromeda Update (`2026-10-28` — Reels IG/FB):**
+   - El recuperador neuronal profundo *Andromeda* indexa embeddings visuales frame-a-frame: plantillas idénticas repetidas degradan distribución por fatiga perceptual (*Originality Score*).
+5. **Reglas Anti-Uniformidad en Gaming Short-Form:**
+   - **Prohibido duplicar texto `portada == callout overlay`** (la portada abre *Curiosity Gap*; el overlay interno subraya el giro o remate).
+   - **Rotar presets visuales y ganchos** entre lotes, limpiar la voz (`highpass` + compresión suave) **antes** de mezclar SFX, y usar `riser.wav` + *sidechain ducking* sutil previo al clímax para elevar retención sin tapar la reacción humana.
 
 ### 6.2 Narrativa de 30 Segundos (Micro-Story Arcs) y Masterclasses de Edición
 1. **Micro-Arco Narrativo en `20–45s` (Blake Snyder *Save the Cat* / Dan Harmon *Story Circle* comprimido):**

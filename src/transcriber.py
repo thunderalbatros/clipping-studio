@@ -22,6 +22,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from src.db import upsert_slice, upsert_transcript_fts
 from src.miner import CHANNEL_PROFILE_PATH, PROJECT_ROOT, RUNS_DIR, enforce_runs_quota
+from src.resource_guard import onnx_threads
 from src.schemas import (
     AnnotatedTranscript,
     AudioPolicy,
@@ -71,6 +72,8 @@ def _load_yamnet() -> tuple[ort.InferenceSession, dict[int, str], list[int]] | N
     if "yamnet" not in _MODEL_CACHE:
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
+        opts.intra_op_num_threads = onnx_threads()
+        opts.inter_op_num_threads = 1
         sess = ort.InferenceSession(str(YAMNET_MODEL_PATH), sess_options=opts, providers=["CPUExecutionProvider"])
         class_map: dict[int, str] = {}
         music_ids: list[int] = []

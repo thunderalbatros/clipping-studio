@@ -674,12 +674,10 @@ def curate_pass2_slice(
         clip_d = e_trim - s_trim
         ff = prop.freeze_frame
         if ff is None:
-            hl_words = [w for w in prop.hook_headline.strip().split() if w][:3]
-            fb_text = " ".join(hl_words)[:28].strip() or "WAIT FOR IT"
             ff = FreezeFrameSpec(
                 timestamp_sec=round(max(2.0, min(clip_d - 2.2, clip_d * 0.45)), 2),
                 box_2d=(300, 250, 750, 750),
-                callout_text=fb_text,
+                callout_text="WAIT FOR IT",
                 duration_sec=1.8,
                 mode="motion_overlay",
                 sfx="whoosh",
@@ -809,12 +807,12 @@ def generate_clip_packaging(plan: EditPlan, transcript: AnnotatedTranscript, str
     from src.design_engine import ensure_complementary_cover_headline
 
     fallbacks = list(pkg.ab_hook_variants)
-    if plan.freeze_frame is not None:
-        fallbacks.append(plan.freeze_frame.callout_text)
+    forbidden = [plan.freeze_frame.callout_text] if plan.freeze_frame is not None else None
     comp_hook, _ = ensure_complementary_cover_headline(
         pkg.suggested_on_screen_hook,
         title=pkg.shorts_title,
         fallback_headlines=fallbacks,
+        forbidden_texts=forbidden,
         max_words=4,
     )
     pkg.suggested_on_screen_hook = comp_hook
@@ -827,6 +825,7 @@ def curate_run(
     audio_policy: AudioPolicy | None = None,
     scene_research: bool = False,
     game: str = "GTA VI",
+    max_clips: int | None = None,
 ) -> RunState:
     """Run Pass-1 + LR-ASD + Pass-2 curation over all transcribed slices in runs/<run_id>/."""
     state_path = run_dir / "state.json"
@@ -915,7 +914,8 @@ def curate_run(
         )
         if plan is not None and critic.approved:
             plans.append(plan)
-            break
+            if max_clips is not None and max_clips > 0 and len(plans) >= max_clips:
+                break
 
     state.slice_audits = audits
     state.edit_plans = plans

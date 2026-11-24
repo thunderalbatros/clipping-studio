@@ -9,6 +9,8 @@ old QA heatmaps, and MP4s of PUBLISHED/REJECTED clips) while strictly preserving
 
 from __future__ import annotations
 
+import json
+import re
 import shutil
 import sqlite3
 import time
@@ -16,10 +18,13 @@ from pathlib import Path
 from typing import Any
 
 from src.db import DEFAULT_DB_PATH, PROJECT_ROOT, init_db
+from src.runtime_paths import dir_size_bytes as _dir_size_bytes
 
 RUNS_DIR = PROJECT_ROOT / "runs"
 
 PROTECTED_ROOT_FILES = frozenset({"studio.db", "studio.db-wal", "studio.db-shm", "telemetry.jsonl"})
+PROTECTED_RUN_SUBDIRS = frozenset({"branding"})
+_SLICE_MP4_RE = re.compile(r"^slice_\d+\.mp4$", re.IGNORECASE)
 INTERMEDIATE_FILE_SUFFIXES = (".wav", ".tmp", ".part")
 INTERMEDIATE_NAME_TOKENS = (
     "_pre_subtitles",
@@ -73,15 +78,17 @@ def _load_clip_statuses(db_path: Path) -> tuple[set[Path], set[Path]]:
     return protected, disposable
 
 
-def _dir_size_bytes(path: Path) -> int:
-    total = 0
-    for child in path.rglob("*"):
-        if child.is_file():
-            try:
-                total += child.stat().st_size
-            except OSError:
-                continue
-    return total
+def _closed_run_dirs(runs_root: Path) -> set[Path]:
+    """Identify run directories whose `state.json` reached a terminal stage (`reviewed` or `failed`)."""
+    closed: set[Path] = set()
+    for state_file in runs_root.glob("*/state.json"):
+        try:
+            st = json.loads(state_file.read_text(encoding="utf-8"))
+            if str(st.get("stage") or "").lower() in {"reviewed", "failed"}:
+                closed.add(state_file.parent.resolve(strict=False))
+        except Exception:
+            continue
+    return closed
 
 
 def run_storage_gc(
@@ -105,15 +112,22 @@ def run_storage_gc(
         }
 
     protected_mp4s, disposable_mp4s = _load_clip_statuses(db_path)
+    closed_runs = _closed_run_dirs(runs_root)
+    branding_dir = (runs_root / "branding").resolve(strict=False)
     now_ts = time.time()
     ttl_sec = max(0.0, float(ttl_hours)) * 3600.0
 
     candidates: list[dict[str, Any]] = []
     scheduled_dirs: set[Path] = set()
 
-    # 1. Identify disposable QA/tmp subdirectories first
+    # 1. Identify disposable QA/tmp subdirectories first (never touch runs/branding/)
     for entry in sorted(runs_root.rglob("*")):
         if not entry.is_dir():
+            continue
+        res_dir = entry.resolve(strict=False)
+        if res_dir == branding_dir or res_dir.is_relative_to(branding_dir):
+            continue
+        if res_dir.parent == runs_root and entry.name.lower() in PROTECTED_RUN_SUBDIRS:
             continue
         name_l = entry.name.lower()
         if any(tok in name_l for tok in INTERMEDIATE_DIR_TOKENS):
@@ -123,7 +137,7 @@ def run_storage_gc(
                 continue
             if age_sec >= ttl_sec:
                 size_b = _dir_size_bytes(entry)
-                scheduled_dirs.add(entry.resolve(strict=False))
+                scheduled_dirs.add(res_dir)
                 candidates.append(
                     {
                         "path": str(entry),
@@ -140,7 +154,9 @@ def run_storage_gc(
             continue
         res = entry.resolve(strict=False)
 
-        # Never touch studio.db / telemetry at runs root
+        # Strictly protect runs/branding/ and studio.db / telemetry at runs root
+        if res.is_relative_to(branding_dir):
+            continue
         if res.parent == runs_root and res.name in PROTECTED_ROOT_FILES:
             continue
         # Skip files already inside a directory scheduled for removal
@@ -161,6 +177,8 @@ def run_storage_gc(
         reason: str | None = None
         if res in disposable_mp4s:
             reason = "published_or_rejected_clip_mp4"
+        elif _SLICE_MP4_RE.match(name_l) and age_sec >= ttl_sec and res.parent in closed_runs:
+            reason = "closed_run_raw_slice_ttl"
         elif suffix_l in INTERMEDIATE_FILE_SUFFIXES and age_sec >= ttl_sec:
             reason = f"intermediate_{suffix_l.lstrip('.')}_ttl"
         elif any(tok in name_l for tok in INTERMEDIATE_NAME_TOKENS) and age_sec >= ttl_sec:

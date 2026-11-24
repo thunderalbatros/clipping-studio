@@ -89,6 +89,7 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> Path:
                 dbtp REAL DEFAULT 0.0,
                 output_mp4 TEXT DEFAULT '',
                 packaging_json TEXT DEFAULT '',
+                status TEXT DEFAULT 'READY_HITL',
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (run_id, clip_id)
             );
@@ -125,22 +126,8 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> Path:
                 lore_entities
             );
 
-            CREATE TABLE IF NOT EXISTS knowledge_chunks (
-                chunk_id TEXT PRIMARY KEY,
-                source_path TEXT NOT NULL,
-                domain TEXT NOT NULL,
-                heading TEXT NOT NULL,
-                content TEXT NOT NULL,
-                content_sha256 TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_chunks_fts USING fts5(
-                chunk_id UNINDEXED,
-                domain,
-                heading,
-                content
-            );
+            DROP TABLE IF EXISTS knowledge_chunks_fts;
+            DROP TABLE IF EXISTS knowledge_chunks;
 
             CREATE TABLE IF NOT EXISTS scene_blueprints (
                 scene_key TEXT PRIMARY KEY,
@@ -321,6 +308,8 @@ def upsert_clip(
     output_mp4: str,
     packaging_json: str = "",
     db_path: Path = DEFAULT_DB_PATH,
+    *,
+    status: str = "READY_HITL",
 ) -> None:
     init_db(db_path)
     now = datetime.now(UTC).isoformat()
@@ -330,8 +319,8 @@ def upsert_clip(
             INSERT INTO clips (
                 run_id, clip_id, slice_id, source_url, streamer_id, start_trim, end_trim,
                 layout_mode, webcam_upscale_factor, no_webcam_gameplay_overlap, matched_lore_entity,
-                critic_overall, media_check_passed, lufs, dbtp, output_mp4, packaging_json, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                critic_overall, media_check_passed, lufs, dbtp, output_mp4, packaging_json, status, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id, clip_id) DO UPDATE SET
                 layout_mode = excluded.layout_mode,
                 webcam_upscale_factor = excluded.webcam_upscale_factor,
@@ -343,6 +332,7 @@ def upsert_clip(
                 dbtp = excluded.dbtp,
                 output_mp4 = excluded.output_mp4,
                 packaging_json = excluded.packaging_json,
+                status = excluded.status,
                 updated_at = excluded.updated_at
             """,
             (
@@ -363,6 +353,7 @@ def upsert_clip(
                 dbtp,
                 output_mp4,
                 packaging_json,
+                status,
                 now,
             ),
         )
@@ -551,150 +542,20 @@ def list_approved_clips(
     limit: int = 50,
     db_path: Path = DEFAULT_DB_PATH,
 ) -> list[dict[str, Any]]:
-    """Return rendered clips that passed media_check (for Long-Form 16:9 compilation or analytics)."""
+    """Return rendered clips that passed media_check and Visual QA (READY_HITL)."""
     init_db(db_path)
     with _connect(db_path) as conn:
         if streamer_id:
             rows = conn.execute(
-                "SELECT * FROM clips WHERE media_check_passed = 1 AND streamer_id = ? ORDER BY critic_overall DESC, updated_at DESC LIMIT ?",
+                "SELECT * FROM clips WHERE media_check_passed = 1 AND COALESCE(status, 'READY_HITL') = 'READY_HITL' "
+                "AND streamer_id = ? ORDER BY critic_overall DESC, updated_at DESC LIMIT ?",
                 (streamer_id, limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM clips WHERE media_check_passed = 1 ORDER BY critic_overall DESC, updated_at DESC LIMIT ?",
+                "SELECT * FROM clips WHERE media_check_passed = 1 AND COALESCE(status, 'READY_HITL') = 'READY_HITL' "
+                "ORDER BY critic_overall DESC, updated_at DESC LIMIT ?",
                 (limit,),
-            ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def upsert_knowledge_chunks(
-    chunks: list[dict[str, str]],
-    db_path: Path = DEFAULT_DB_PATH,
-) -> dict[str, int]:
-    """Idempotently ingest structured knowledge chunks into SQLite + FTS5 (skips unchanged SHA-256)."""
-    import hashlib
-
-    init_db(db_path)
-    now = datetime.now(UTC).isoformat()
-    inserted, updated, unchanged = 0, 0, 0
-    with _connect(db_path) as conn:
-        for ch in chunks:
-            cid = str(ch["chunk_id"])
-            src = str(ch["source_path"])
-            dom = str(ch["domain"])
-            heading = str(ch["heading"])
-            content = str(ch["content"]).strip()
-            sha = hashlib.sha256(f"{dom}|{heading}|{content}".encode()).hexdigest()
-            existing = conn.execute(
-                "SELECT content_sha256 FROM knowledge_chunks WHERE chunk_id = ?",
-                (cid,),
-            ).fetchone()
-            if existing and str(existing["content_sha256"]) == sha:
-                unchanged += 1
-                continue
-            conn.execute(
-                """
-                INSERT INTO knowledge_chunks (chunk_id, source_path, domain, heading, content, content_sha256, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(chunk_id) DO UPDATE SET
-                    source_path = excluded.source_path,
-                    domain = excluded.domain,
-                    heading = excluded.heading,
-                    content = excluded.content,
-                    content_sha256 = excluded.content_sha256,
-                    updated_at = excluded.updated_at
-                """,
-                (cid, src, dom, heading, content, sha, now),
-            )
-            conn.execute("DELETE FROM knowledge_chunks_fts WHERE chunk_id = ?", (cid,))
-            conn.execute(
-                "INSERT INTO knowledge_chunks_fts (chunk_id, domain, heading, content) VALUES (?, ?, ?, ?)",
-                (cid, dom, heading, content),
-            )
-            if existing:
-                updated += 1
-            else:
-                inserted += 1
-    return {"inserted": inserted, "updated": updated, "unchanged": unchanged, "total_input": len(chunks)}
-
-
-def ingest_markdown_knowledge(
-    md_path: Path,
-    domain: str,
-    db_path: Path = DEFAULT_DB_PATH,
-) -> dict[str, int]:
-    """Split a Markdown bible by ## / ### headings and ingest every section into `knowledge_chunks_fts`."""
-    import re
-
-    text = md_path.read_text(encoding="utf-8")
-    sections: list[tuple[str, list[str]]] = []
-    cur_h = md_path.stem
-    cur_lines: list[str] = []
-    for ln in text.splitlines():
-        if re.match(r"^#{2,3}\s+", ln):
-            if cur_lines and "".join(cur_lines).strip():
-                sections.append((cur_h, cur_lines))
-            cur_h = ln.lstrip("#").strip()
-            cur_lines = []
-        else:
-            cur_lines.append(ln)
-    if cur_lines and "".join(cur_lines).strip():
-        sections.append((cur_h, cur_lines))
-
-    try:
-        rel_src = str(md_path.resolve().relative_to(PROJECT_ROOT.resolve())).replace("\\", "/")
-    except ValueError:
-        rel_src = md_path.name
-
-    chunks: list[dict[str, str]] = []
-    for idx, (heading, lines) in enumerate(sections, start=1):
-        body = "\n".join(lines).strip()
-        if len(body) < 40:
-            continue
-        chunks.append(
-            {
-                "chunk_id": f"{domain}:{md_path.stem}:{idx:03d}",
-                "source_path": rel_src,
-                "domain": domain,
-                "heading": heading,
-                "content": body,
-            }
-        )
-    return upsert_knowledge_chunks(chunks, db_path=db_path)
-
-
-def search_knowledge_fts(
-    query: str,
-    domain: str | None = None,
-    limit: int = 5,
-    db_path: Path = DEFAULT_DB_PATH,
-) -> list[dict[str, str]]:
-    """Query `knowledge_chunks_fts` using BM25 ranking with optional domain filter."""
-    init_db(db_path)
-    with _connect(db_path) as conn:
-        if domain:
-            rows = conn.execute(
-                """
-                SELECT k.chunk_id, k.source_path, k.domain, k.heading, k.content
-                FROM knowledge_chunks_fts f
-                JOIN knowledge_chunks k ON k.chunk_id = f.chunk_id
-                WHERE knowledge_chunks_fts MATCH ? AND k.domain = ?
-                ORDER BY bm25(knowledge_chunks_fts)
-                LIMIT ?
-                """,
-                (query, domain, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT k.chunk_id, k.source_path, k.domain, k.heading, k.content
-                FROM knowledge_chunks_fts f
-                JOIN knowledge_chunks k ON k.chunk_id = f.chunk_id
-                WHERE knowledge_chunks_fts MATCH ?
-                ORDER BY bm25(knowledge_chunks_fts)
-                LIMIT ?
-                """,
-                (query, limit),
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -932,7 +793,6 @@ def inspect_db_summary(db_path: Path = DEFAULT_DB_PATH) -> dict[str, Any]:
             "telemetry",
             "campaigns",
             "transcripts_fts",
-            "knowledge_chunks",
             "scene_blueprints",
             "creators",
         ):

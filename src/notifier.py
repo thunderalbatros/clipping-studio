@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import threading
@@ -81,20 +82,23 @@ def send_clip_ready_alert(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Notify operator that a verified 1080p60 9:16 master clip is ready for publication."""
-    title = str((packaging or {}).get("shorts_title") or clip_id)
-    hook = str((packaging or {}).get("suggested_on_screen_hook") or "")
-    x_post = str((packaging or {}).get("x_post_text") or "")
+    title = html.escape(str((packaging or {}).get("shorts_title") or clip_id), quote=True)
+    hook = html.escape(str((packaging or {}).get("suggested_on_screen_hook") or ""), quote=True)
+    x_post = html.escape(str((packaging or {}).get("x_post_text") or "")[:180], quote=True)
     bounty_safe = bool((packaging or {}).get("bounty_safe", True))
+    safe_run = html.escape(str(run_id), quote=True)
+    safe_clip = html.escape(str(clip_id), quote=True)
+    safe_fname = html.escape(mp4_path.name, quote=True)
 
     lines = [
-        f"<b>Clipping Studio — Clip Ready</b> ({run_id}/{clip_id})",
+        f"<b>Clipping Studio — Clip Ready</b> ({safe_run}/{safe_clip})",
         f"<b>Shorts Title:</b> {title}",
         f"<b>Hook:</b> {hook}",
         f"<b>Critic:</b> {critic_overall:.2f} | <b>Bounty-Safe:</b> {'YES' if bounty_safe else 'NO'}",
-        f"<b>File:</b> <code>{mp4_path.name}</code>",
+        f"<b>File:</b> <code>{safe_fname}</code>",
     ]
     if x_post:
-        lines.append(f"<b>X Copy:</b> {x_post[:180]}")
+        lines.append(f"<b>X Copy:</b> {x_post}")
 
     buttons = [
         [
@@ -107,14 +111,19 @@ def send_clip_ready_alert(
 
 def send_bounty_alert(campaign: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
     """Send HITL review alert for a discovered CPM bounty campaign."""
-    cid = str(campaign.get("campaign_id") or "")
+    cid = html.escape(str(campaign.get("campaign_id") or ""), quote=True)
+    plat = html.escape(str(campaign.get("platform") or ""), quote=True)
+    title = html.escape(str(campaign.get("title") or ""), quote=True)
+    rec = html.escape(str(campaign.get("recommendation") or ""), quote=True)
+    elig = html.escape(str(campaign.get("eligible_from_ar")), quote=True)
+    flags = html.escape(json.dumps(campaign.get("risk_flags") or []), quote=True)
     lines = [
-        f"<b>Bounty Radar — HITL Review</b> [{campaign.get('platform')}]",
-        f"<b>Title:</b> {campaign.get('title')}",
+        f"<b>Bounty Radar — HITL Review</b> [{plat}]",
+        f"<b>Title:</b> {title}",
         f"<b>CPM:</b> ${float(campaign.get('cpm_usd') or 0.0):.2f}/1k | "
         f"<b>Burn:</b> {float(campaign.get('burn_rate_pct') or 0.0):.1f}%",
-        f"<b>Rec:</b> {campaign.get('recommendation')} | <b>AR Eligible:</b> {campaign.get('eligible_from_ar')}",
-        f"<b>Flags:</b> {json.dumps(campaign.get('risk_flags') or [])}",
+        f"<b>Rec:</b> {rec} | <b>AR Eligible:</b> {elig}",
+        f"<b>Flags:</b> {flags}",
         f"Approve CLI: <code>python -m src.cli bounties approve --id {cid} --verdict APPROVED</code>",
     ]
     return send_telegram_message("\n".join(lines), dry_run=dry_run)

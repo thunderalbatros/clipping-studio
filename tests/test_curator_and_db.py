@@ -7,16 +7,15 @@ from pathlib import Path
 from src.curator import _checked_by_code
 from src.db import (
     get_daily_llm_spend_usd,
-    ingest_markdown_knowledge,
     init_db,
     insert_telemetry,
     inspect_db_summary,
     search_fts,
-    search_knowledge_fts,
     upsert_slice,
     upsert_transcript_fts,
     upsert_vod,
 )
+from src.rag_engine import _split_markdown_chunks, query_rag, rebuild_rag_index
 from src.resource_guard import heavy_local_allowed, onnx_threads, snapshot
 from src.schemas import AnnotatedTranscript, EditPlan, WordTimestamp
 
@@ -99,11 +98,12 @@ def test_knowledge_fts_ingestion_idempotency_and_bm25_search(tmp_path: Path) -> 
         "Reply with author engagement carries 75.0 weight while external links suffer reach penalties.\n",
         encoding="utf-8",
     )
-    r1 = ingest_markdown_knowledge(md_file, domain="algorithms", db_path=db_file)
+    chunks = _split_markdown_chunks(md_file, default_domain="shortform_craft")
+    r1 = rebuild_rag_index(db_path=db_file, chunks_override=chunks, skip_vectors=True)
     assert r1["inserted"] == 2 and r1["unchanged"] == 0
-    r2 = ingest_markdown_knowledge(md_file, domain="algorithms", db_path=db_file)
+    r2 = rebuild_rag_index(db_path=db_file, chunks_override=chunks, skip_vectors=True)
     assert r2["inserted"] == 0 and r2["unchanged"] == 2
-    hits = search_knowledge_fts("MMoE OR Swiped", domain="algorithms", db_path=db_file)
-    assert len(hits) == 1
+    hits = query_rag("MMoE Swiped", domain="shortform_craft", db_path=db_file, use_vectors=False)
+    assert len(hits) >= 1
     assert "YouTube Shorts" in hits[0]["heading"]
 

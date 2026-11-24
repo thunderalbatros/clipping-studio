@@ -1,16 +1,17 @@
 ---
 trigger: always_on
-description: SOTA OSS KS-4, enrutamiento 3 carriles, higiene visual/disco, Research-First y apertura multi-cliente.
+description: Cloud-First GCP L4 + Vertex Serverless, RAG 3-Niveles + Web-First, SOTA KS-4 e higiene CTO.
 ---
 
-# Regla 05 — SOTA KS-4, 3 Carriles y Reglas CTO
+# Regla 05 — Cloud-First, RAG 3-Niveles, SOTA KS-4 y Reglas CTO
 
-1. **Integrate-over-Build & Ventana SOTA 3m (KS-4):** Antes de adoptar librerías o crear módulos nuevos, verificar SOTA de los últimos 3 meses y priorizar OSS comercial vigente (MIT/Apache-2.0/Unlicense: `auto-editor`, `birefnet-general-lite`, `sqlite-vec`, `fastembed`, `onnxruntime==1.32.0`). Prohibido `CC-BY-NC`.
-2. **Cómputo en 3 Carriles:**
-   - **Carril 1 (`local_hp`, `$0`):** Ingesta (`yt-dlp`, `curl_cffi`, `live_sniper`), `SQLite WAL`, `FFmpeg h264_qsv`, `auto-editor`, `parakeet`, `YAMNet`, `LR-ASD`, `BiRefNet-lite` (1 imagen); protegido por `resource_guard` (`used_ram_pct > 85%`).
-   - **Carril 2 (`colab_t4`, `$0`):** `Demucs`, *video matting* `60fps`, diarización o GPU.
-   - **Carril 3 (`gcp_spot_l4`):** Prohibido encender VM por 1 clip; solo lotes `>=5-10` con watchdog `shutdown -h now` y sin `pd-balanced` persistentes.
-3. **Calidad Visual y Fluidez:** Prohibido Frame 0 contaminado, subtítulos en portadas (`cover_9_16.jpg` pre-`libass`), repetir título en gancho de portada, *freeze-frames* antifuncionales que corten la fluidez y callouts estáticos pequeños (todo gráfico sobre video corre fluido con escala editorial, transición y SFX).
-4. **Research-First / Scene-Match:** Deconstruir outliers virales antes de editar (`scene_researcher`), con purga obligatoria de MP4 temporales de referencia.
-5. **Apertura Multi-Cliente y Multi-Bounty:** Prohibido whitelists bloqueantes de streamers o nichos; el pipeline acepta cualquier creador/cliente/bounty vía auto-profiling SQLite.
-6. **Higiene de Disco (`C:\`) y Evidencia:** Purga automática de temporales multimedia, `python -m src.cli gc` periódico, y separar siempre `[ESTÁTICO]` vs `[RUNTIME REAL]`.
+1. **Integrate-over-Build & SOTA `<3m` (KS-4):** Verificar SOTA `<3 meses` antes de adoptar librerías o crear módulos; priorizar OSS comercial (`auto-editor`, `birefnet-general-lite`, `sqlite-vec`, `fastembed`, `chonkie`, `pydantic-ai-slim`, `pydantic-evals`, `ffmpeg-normalize`, `onnxruntime==1.32.0`). Prohibido `CC-BY-NC`.
+2. **Arquitectura Cloud-First (3 Planos):**
+   - **Control + Ingesta (`local_hp`, `$0`):** CLI, ingesta IP residencial (`yt-dlp`, `curl_cffi`, `live_sniper`), `SQLite WAL`, QA liviano y `psutil` (`resource_guard` + `unload_heavy_models()`).
+   - **Worker GPU (`GCP Cloud Run Jobs` + `NVIDIA L4`):** Cómputo pesado (video/audio/matting/lotes) en Cloud Run Jobs (`--no-gpu-zonal-redundancy` + GCS FUSE `us-central1`, escala a `$0`/s, cero VMs/discos ociosos). `colab_t4` = rescate `$0`.
+   - **Vertex AI Serverless:** `gemini-3.8-flash` / `gemini-3.5-flash-lite` (nunca `gemini-2.5-flash` retirado `2026-12-01`; opt-in Flex `-50%`), `gemini-nano-banana-2.1` (reemplaza Imagen 3/4) y `gemini-3.8-flash-lite-tts`.
+3. **RAG 3-Niveles + Web-First:**
+   - **N1 (`runs/studio.db`):** Reglas, 7 skills, memoria episódica y campañas (`sqlite-vec` `domain` pre-KNN + `chonkie`).
+   - **N2 (`rag_library.sqlite` `?mode=ro&immutable=1` + Qdrant RO):** Libros/matrices (`TextCrossEncoder` rerank).
+   - **N3 (Web-First `<3m`):** Web search para SDKs/licencias, cambios algorítmicos y lore vivo en `<untrusted_source_data>`.
+4. **Calidad Visual, Research-First e Higiene:** Protocolo *Research-First / Scene-Match* con purga de MP4 temporales; prohibido Frame 0 sucio, subtítulos en portadas, `portada == overlay`, *freeze-frames* antifuncionales y whitelists bloqueantes. QA (`evals/visual_qa.py`) obligatorio antes de `READY_HITL`/Telegram; `cli gc` y separar `[ESTÁTICO]` vs `[RUNTIME REAL]`.
