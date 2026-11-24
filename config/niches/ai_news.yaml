@@ -1,0 +1,39 @@
+niche_id: "ai_news"
+display_name: "AI, Tech & Developer News"
+description: "Fast-paced AI breakthroughs, benchmarks, and product launches enhanced with HyperFrames diagrams and B-roll."
+production_ready: false
+languages: ["en", "es"]
+target_platforms:
+  - "youtube_shorts"
+  - "tiktok"
+  - "instagram_reels"
+  - "x"
+  - "youtube_long"
+framing_mode: "presenter_and_slides"
+silence_trim_policy: "aggressive"
+audio_pipeline:
+  use_bs_roformer: false
+  use_deepfilternet: true
+  preserve_crowd_laughter: false
+  default_audio_policy: "strict_clean"
+asr_engine_preference: "parakeet_v3"
+diarization_required: false
+copyright_guard: "standard_dmca"
+visual_presets:
+  badge_label: "AI NEWS"
+  accent_color: "#10B981"
+  caption_style: "impact_karaoke"
+  motion_graphics_engine: "hyperframes_diagrams"
+  broll_or_diagram_mode: "diagrams_and_broll"
+  allowed_scene_types: ["just_chatting", "trailer_or_video_reaction"]
+  default_hashtags: ["#AI", "#TechNews", "#Shorts"]
+  qa_special_rules:
+    - "Hook in 0-2.5s must state concrete benchmark/release impact (zero generic 'AI just changed forever' slop)."
+    - "HyperFrames diagrams/B-roll callouts must stay strictly inside Universal Safe Box [48..888, 420..1248]."
+min_qa_overall: 0.78
+rag_domains:
+  - "shortform_craft"
+  - "design_ctr"
+  - "media_engineering"
+  - "episodic_memory"
+lore_source: null

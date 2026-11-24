@@ -27,6 +27,7 @@ from urllib.parse import urljoin
 
 import websockets
 from curl_cffi import requests as curl_requests
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.db import insert_telemetry, upsert_slice, upsert_vod
 from src.miner import RUNS_DIR, _ensure_media_path, probe_kick_channel
@@ -333,6 +334,16 @@ def resolve_live_hls_url(platform: str, channel: str) -> tuple[str | None, int |
     return None, None
 
 
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=0.4, min=0.4, max=3.0),
+)
+def _http_get_chrome(url: str, timeout: int = 10) -> Any:
+    eff_timeout = min(20, max(2, int(timeout)))
+    return curl_requests.get(url, impersonate="chrome", timeout=eff_timeout)
+
+
 async def _poll_hls_ring_buffer(
     master_url: str,
     ring: HLSRingBuffer,
@@ -345,7 +356,7 @@ async def _poll_hls_ring_buffer(
     media_url = master_url
     consecutive_expired = 0
     try:
-        r0 = await asyncio.to_thread(curl_requests.get, master_url, impersonate="chrome", timeout=10)
+        r0 = await asyncio.to_thread(_http_get_chrome, master_url, 10)
         if r0.status_code == 200:
             media_url = _select_best_hls_variant(master_url, r0.text)
     except Exception:
@@ -353,7 +364,7 @@ async def _poll_hls_ring_buffer(
 
     while not stop_event.is_set():
         try:
-            resp = await asyncio.to_thread(curl_requests.get, media_url, impersonate="chrome", timeout=10)
+            resp = await asyncio.to_thread(_http_get_chrome, media_url, 10)
             if resp.status_code == 200:
                 consecutive_expired = 0
                 lines = [ln.strip() for ln in resp.text.splitlines() if ln.strip()]
@@ -367,7 +378,7 @@ async def _poll_hls_ring_buffer(
                     elif not ln.startswith("#"):
                         seg_url = urljoin(media_url, ln)
                         if not ring.has_seen(seg_url):
-                            sr = await asyncio.to_thread(curl_requests.get, seg_url, impersonate="chrome", timeout=10)
+                            sr = await asyncio.to_thread(_http_get_chrome, seg_url, 10)
                             if sr.status_code == 200 and sr.content:
                                 ring.append(seg_url, seg_dur, sr.content)
                             elif sr.status_code in {403, 404, 410}:
@@ -380,7 +391,7 @@ async def _poll_hls_ring_buffer(
                 refreshed_master, _ = await asyncio.to_thread(resolve_live_hls_url, platform, channel)
                 if refreshed_master:
                     media_url = refreshed_master
-                    r_new = await asyncio.to_thread(curl_requests.get, refreshed_master, impersonate="chrome", timeout=10)
+                    r_new = await asyncio.to_thread(_http_get_chrome, refreshed_master, 10)
                     if r_new.status_code == 200:
                         media_url = _select_best_hls_variant(refreshed_master, r_new.text)
         except Exception:
@@ -447,7 +458,7 @@ async def _listen_kick_chat_rest(
     primed = False
     while not stop_event.is_set():
         try:
-            resp = await asyncio.to_thread(curl_requests.get, url, impersonate="chrome", timeout=10)
+            resp = await asyncio.to_thread(_http_get_chrome, url, 10)
             if resp.status_code == 200:
                 msgs = ((resp.json() or {}).get("data") or {}).get("messages") or []
                 for msg in reversed(msgs):

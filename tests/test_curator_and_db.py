@@ -83,7 +83,7 @@ def test_resource_guard_snapshot_and_threads() -> None:
     assert snap["logical_cores"] >= 1
     assert snap["total_ram_mb"] > 0
     assert 1 <= onnx_threads() <= 4
-    allowed, reason, _ = heavy_local_allowed(min_free_ram_mb=1, min_free_disk_gb=0.1)
+    allowed, reason, _ = heavy_local_allowed(min_free_ram_mb=1, max_used_ram_pct=99.9, min_free_disk_gb=0.1)
     assert allowed is True
     assert reason == "resources healthy"
 

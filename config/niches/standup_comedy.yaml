@@ -1,0 +1,38 @@
+niche_id: "standup_comedy"
+display_name: "Stand-Up Comedy & Live Crowd Work"
+description: "Comedic setups, crowd-work banter, and punchlines preserving room timing and authentic audience laughter."
+production_ready: false
+languages: ["en", "es"]
+target_platforms:
+  - "youtube_shorts"
+  - "tiktok"
+  - "instagram_reels"
+  - "facebook_reels"
+  - "x"
+framing_mode: "dynamic_speaker_track"
+silence_trim_policy: "preserve_pauses"
+audio_pipeline:
+  use_bs_roformer: false
+  use_deepfilternet: false
+  preserve_crowd_laughter: true
+  default_audio_policy: "strict_clean"
+asr_engine_preference: "faster_whisper_l4"
+diarization_required: false
+copyright_guard: "standard_dmca"
+visual_presets:
+  badge_label: "STAND-UP"
+  accent_color: "#FF3B5C"
+  caption_style: "editorial_clean"
+  motion_graphics_engine: "minimal_lower_third"
+  broll_or_diagram_mode: "none"
+  allowed_scene_types: ["just_chatting"]
+  default_hashtags: ["#StandUp", "#Comedy", "#Shorts"]
+  qa_special_rules:
+    - "Preserve comedian timing pauses and crowd laughter release; NEVER chop pre-punchline beat."
+    - "Captions must not spoil the punchline word before the comedian speaks it."
+min_qa_overall: 0.78
+rag_domains:
+  - "shortform_craft"
+  - "design_ctr"
+  - "episodic_memory"
+lore_source: null

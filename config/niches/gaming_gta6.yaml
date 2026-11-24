@@ -1,0 +1,54 @@
+niche_id: "gaming_gta6"
+display_name: "Gaming — GTA VI Streamers & Lore"
+description: "High-retention 9:16 & 16:9 streamer gameplay moments, physics bugs, heists, and Leonida secrets."
+production_ready: true
+languages: ["en", "es"]
+target_platforms:
+  - "youtube_shorts"
+  - "tiktok"
+  - "instagram_reels"
+  - "facebook_reels"
+  - "x"
+  - "youtube_long"
+framing_mode: "split_gaming_cam"
+silence_trim_policy: "moderate"
+audio_pipeline:
+  use_bs_roformer: false
+  use_deepfilternet: false
+  preserve_crowd_laughter: false
+  default_audio_policy: "strict_clean"
+asr_engine_preference: "parakeet_v3"
+diarization_required: false
+copyright_guard: "standard_dmca"
+visual_presets:
+  badge_label: "GTA VI"
+  accent_color: "#FFD400"
+  caption_style: "impact_karaoke"
+  motion_graphics_engine: "editorial_callout"
+  broll_or_diagram_mode: "none"
+  allowed_scene_types: ["active_gameplay"]
+  default_hashtags: ["#GTA6", "#Shorts"]
+  qa_special_rules:
+    - "Require active_gameplay HUD/control and zero stream meta-talk (gifted subs/donations)."
+    - "Verify streamer facecam card stays unobstructed above gameplay with zero cover==overlay duplication."
+min_qa_overall: 0.78
+rag_domains:
+  - "gta6_streamers"
+  - "shortform_craft"
+  - "design_ctr"
+  - "bounties_dmca"
+  - "episodic_memory"
+lore_source:
+  kind: "mediawiki_api"
+  endpoint_url: "https://gta.fandom.com/api.php"
+  default_subject: "GTA VI"
+  index_file: "context/gta6_lore_index.json"
+  seed_pages:
+    - "Grand Theft Auto VI"
+    - "State of Leonida"
+    - "Vice City (HD Universe)"
+    - "Lucia Caminos"
+    - "Jason Duval"
+    - "Radio Stations in GTA VI"
+    - "Missions in GTA VI"
+    - "Secrets and Easter Eggs in GTA VI"

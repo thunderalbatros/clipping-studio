@@ -80,10 +80,9 @@ def measure_runs_usage_mb(runs_root: Path = RUNS_DIR) -> float:
 
 
 def get_runs_max_gb() -> float:
-    if CHANNEL_PROFILE_PATH.exists():
-        data = yaml.safe_load(CHANNEL_PROFILE_PATH.read_text(encoding="utf-8")) or {}
-        return float(data.get("storage", {}).get("runs_max_gb", 4.0))
-    return 4.0
+    from src.settings import load_channel_profile
+
+    return float(load_channel_profile(CHANNEL_PROFILE_PATH).storage.runs_max_gb)
 
 
 def _protected_run_ids_from_db(db_path: Path) -> set[str]:
@@ -99,10 +98,9 @@ def _protected_run_ids_from_db(db_path: Path) -> set[str]:
         if not cols:
             return set()
         if "status" in cols:
-            placeholders = ",".join("?" for _ in PROTECTED_CLIP_STATUSES)
             rows = conn.execute(
-                f"SELECT DISTINCT run_id FROM clips WHERE status IN ({placeholders})",
-                tuple(PROTECTED_CLIP_STATUSES),
+                "SELECT DISTINCT run_id FROM clips WHERE status IN (?, ?)",
+                ("READY_HITL", "NEEDS_VISUAL_FIX"),
             ).fetchall()
         else:
             rows = conn.execute("SELECT DISTINCT run_id FROM clips WHERE media_check_passed = 1").fetchall()

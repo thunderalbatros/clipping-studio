@@ -1,51 +1,46 @@
-# Clipping Studio — Compute Profiles & Mode Defaults (Hito 0)
-# Abstraccion de computo para degradacion elegante: gcp_spot_l4 -> colab_t4 -> local_hp
+# Clipping Studio — Cloud-First Compute Profiles (v4.0-B1, validated via pydantic-settings extra="forbid")
+# Canonical planes: local_control (HP 250 G8 ingest/control/QA) vs gcp_cloud_run_l4 (Cloud Run Jobs NVIDIA L4).
 
-studio:
-  default_mode: streamer_gta6_lite
-  default_voice_mode: none # none (Bounties CPM) | human_batch (Shure SM58) | tts
-  dmca_music_guard: true
-  max_review_retries: 1
-  audio_target_lufs: -14.0
-  audio_true_peak_dbtp: -1.0
+default_profile: "local_control"
+
+profile_aliases:
+  local_hp: "local_control"
+  gcp_spot_l4: "gcp_cloud_run_l4"
+  colab_t4: "gcp_cloud_run_l4"
 
 profiles:
-  local_hp:
-    description: "HP 250 G8 (i5-1035G1, 16GB RAM, Intel UHD QuickSync) — USD 0/mes"
-    device: cpu
-    asr_primary: "nvidia/parakeet-tdt-0.6b-v3"
-    asr_backend: "onnx-asr"
-    asr_quantization: "int8"
-    asr_fallback: "faster-whisper:large-v3-turbo:int8"
-    video_encoder: "h264_qsv"
-    video_encoder_fallback: "libx264"
-    qsv_pixel_format: "nv12"
-    llm_primary: "vertex_ai_or_gemini_free"
-    llm_fallback_ladder: ["groq", "openrouter"]
-
-  gcp_spot_l4:
-    description: "GCP g2-standard-4 Spot VM (NVIDIA L4 24GB sm_89) — Acelerador finito USD 30"
-    device: cuda
-    dtype: "bfloat16"
+  local_control:
+    profile_id: "local_control"
+    description: "HP 250 G8 Control + Residential Ingest + Lightweight QA (CPU ONNX int8 + Intel QuickSync h264_qsv, $0/mo)"
+    plane: "control_and_ingest"
+    device: "cpu"
+    dtype: "int8"
     attn_implementation: "sdpa"
     asr_primary: "nvidia/parakeet-tdt-0.6b-v3"
-    asr_backend: "onnx-asr-cuda"
-    asr_quantization: "fp16"
-    video_encoder: "h264_nvenc"
+    asr_backend: "onnx-asr"
+    video_encoder: "h264_qsv"
     video_encoder_fallback: "libx264"
-    idle_shutdown_minutes: 12
+    pixel_format: "nv12"
     llm_primary: "vertex_ai"
     llm_fallback_ladder: ["groq", "openrouter"]
+    heavy_gpu_models_enabled: false
+    network_timeout_sec: 15.0
+    max_job_timeout_minutes: 30
 
-  colab_t4:
-    description: "Google Colab T4 (16GB sm_75, 200 CU/mes) + Google Drive 5TB — USD 0/mes"
-    device: cuda
-    dtype: "float16" # Estricto sm_75: prohibido bfloat16 y fp8
-    attn_implementation: "sdpa" # Estricto sm_75: prohibido flash_attention_2
-    asr_primary: "nvidia/parakeet-tdt-0.6b-v3"
-    asr_backend: "onnx-asr-cuda"
-    asr_quantization: "int8"
+  gcp_cloud_run_l4:
+    profile_id: "gcp_cloud_run_l4"
+    description: "GCP Cloud Run Jobs GPU Worker (NVIDIA L4 24GB sm_89, us-central1, --no-gpu-zonal-redundancy, scale-to-$0)"
+    plane: "gpu_worker"
+    device: "cuda"
+    dtype: "bfloat16"
+    attn_implementation: "sdpa"
+    asr_primary: "faster-whisper-large-v3-turbo"
+    asr_backend: "ctranslate2-cuda"
     video_encoder: "h264_nvenc"
     video_encoder_fallback: "libx264"
-    llm_primary: "gemini_free"
+    pixel_format: "yuv420p"
+    llm_primary: "vertex_ai"
     llm_fallback_ladder: ["groq", "openrouter"]
+    heavy_gpu_models_enabled: true
+    network_timeout_sec: 20.0
+    max_job_timeout_minutes: 15

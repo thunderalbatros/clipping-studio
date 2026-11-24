@@ -18,6 +18,7 @@ import asyncio
 import os
 import re
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Literal, TypeVar
@@ -39,6 +40,9 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
 
 from src.db import get_daily_llm_spend_usd, insert_telemetry
+from src.logging_utils import get_logger
+
+log = get_logger("llm_router")
 
 T = TypeVar("T", bound=BaseModel)
 ServiceTierChoice = Literal["standard", "flex", "batch"]
@@ -396,6 +400,8 @@ def generate_structured(
     *,
     service_tier: ServiceTierChoice | None = None,
     model_override: Model | None = None,
+    agent_setup: Callable[[Agent[None, T]], None] | None = None,
+    tool_timeout: float = 20.0,
 ) -> tuple[T, str]:
     """Generate a Pydantic v2 validated object using `pydantic_ai.Agent` + `FallbackModel` + `NativeOutput`."""
     os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
@@ -421,8 +427,11 @@ def generate_structured(
         output_type=output_spec,
         instructions=system_instruction,
         retries={"output": max(0, int(max_retries)), "tools": max(0, int(max_retries))},
+        tool_timeout=min(20.0, max(2.0, float(tool_timeout))),
         defer_model_check=True,
     )
+    if agent_setup is not None:
+        agent_setup(agent)
     user_prompt = build_user_prompt(prompt, images=images)
 
     t0 = time.perf_counter()
@@ -465,15 +474,25 @@ def generate_structured(
                 "engine": "pydantic_ai",
             },
         )
-        print(
-            f"[LLM_ROUTER] engine=pydantic_ai provider=vertex_ai model={eff_model_name} tier={eff_tier} "
-            f"latency_ms={latency_ms} prompt_tokens={prompt_toks} cached_tokens={cached_toks or None} "
-            f"est_usd=${est_usd:.5f} status=OK"
+        log.info(
+            "llm_structured_completed",
+            provider="vertex_ai",
+            model=eff_model_name,
+            service_tier=eff_tier,
+            latency_ms=latency_ms,
+            prompt_tokens=prompt_toks,
+            cached_tokens=cached_toks,
+            output_tokens=output_toks,
+            est_cost_usd=est_usd,
         )
     else:
-        print(
-            f"[LLM_ROUTER] engine=pydantic_ai provider={provider_label} model={res_model} "
-            f"latency_ms={latency_ms} prompt_tokens={prompt_toks} output_tokens={output_toks} status=OK"
+        log.info(
+            "llm_structured_completed",
+            provider=provider_label,
+            model=res_model,
+            latency_ms=latency_ms,
+            prompt_tokens=prompt_toks,
+            output_tokens=output_toks,
         )
 
     return parsed, provider_label

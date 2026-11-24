@@ -18,7 +18,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from src.db import upsert_slice, upsert_transcript_fts
 from src.llm_router import build_cached_system_instruction, generate_structured, wrap_untrusted_source_data
 from src.miner import CHANNEL_PROFILE_PATH, PROJECT_ROOT, STREAMERS_PATH
-from src.rag_engine import build_curator_rag_context
+from src.niche_packs import DEFAULT_NICHE_ID, load_niche_pack
+from src.rag_engine import attach_rag_agent_tool, build_curator_rag_context
 from src.schemas import (
     AnnotatedTranscript,
     AudioPolicy,
@@ -32,6 +33,7 @@ from src.schemas import (
     SliceAuditResult,
     WordTimestamp,
 )
+from src.settings import load_channel_profile
 from src.speaker_guard import score_streamer_speech_asd
 
 LORE_INDEX_PATH = PROJECT_ROOT / "context" / "gta6_lore_index.json"
@@ -559,6 +561,9 @@ def curate_pass2_slice(
     streamer_id: str = "",
     audio_policy: AudioPolicy = "strict_clean",
     scene_blueprint: SceneBlueprint | None = None,
+    *,
+    niche_id: str = DEFAULT_NICHE_ID,
+    language: str = "en",
 ) -> tuple[EditPlan | None, BlindCriticResult]:
     """Pass 2: Run LR-ASD speaker separation, word-index grounded TrimRefiner, SceneBlueprint injection, CHECKED BY CODE & Blind Critic."""
     video_path = Path(cand.slice_video_path)
@@ -601,9 +606,17 @@ def curate_pass2_slice(
                 f"{wrap_untrusted_source_data('scene_blueprint', bp_txt)}\n\n"
             )
     rag_ctx = ""
+    eff_lang = transcript.language if (language == "auto" and transcript.language) else (language or "en")
     try:
         rag_topic = f"{audit.hook_headline} {audit.matched_lore_entity or ''} {brief or ''} synchresis seamless loop"
-        rag_ctx = build_curator_rag_context(streamer_id=streamer_id or "gta6", topic_query=rag_topic, stage="pass2", max_tokens=550)
+        rag_ctx = build_curator_rag_context(
+            streamer_id=streamer_id or niche_id,
+            topic_query=rag_topic,
+            stage="pass2",
+            max_tokens=550,
+            niche=niche_id,
+            language=eff_lang,
+        )
     except Exception:
         rag_ctx = ""
     rag_block = (
@@ -612,6 +625,9 @@ def curate_pass2_slice(
         else ""
     )
     min_start = 1.0 if (cand.platform == "kick" and cand.signal_source == "kick_clips_rank" and vdur >= 24.0) else 0.0
+
+    def _setup_rag_tool(ag: Any) -> None:
+        attach_rag_agent_tool(ag, default_niche=niche_id, default_language=eff_lang)
 
     feedback_note = ""
     last_critic: BlindCriticResult | None = None
@@ -642,6 +658,7 @@ def curate_pass2_slice(
                 system_instruction=sys_refine,
                 images=[zoom_png],
                 media_resolution="MEDIA_RESOLUTION_HIGH",
+                agent_setup=_setup_rag_tool,
             )
         except ValidationError as exc:
             prop, _ = generate_structured(
@@ -650,6 +667,7 @@ def curate_pass2_slice(
                 system_instruction=sys_refine,
                 images=[zoom_png],
                 media_resolution="MEDIA_RESOLUTION_HIGH",
+                agent_setup=_setup_rag_tool,
             )
 
         s_word_idx: int | None = None
@@ -745,9 +763,19 @@ def curate_pass2_slice(
     return (best_plan if last_critic.approved else None), last_critic
 
 
-def generate_clip_packaging(plan: EditPlan, transcript: AnnotatedTranscript, streamer_id: str) -> ClipPackaging:
+def generate_clip_packaging(
+    plan: EditPlan,
+    transcript: AnnotatedTranscript,
+    streamer_id: str,
+    *,
+    niche_id: str = DEFAULT_NICHE_ID,
+    language: str = "en",
+) -> ClipPackaging:
     """Generate 5-network ClipPackaging (YT Shorts, TikTok, IG Reels, FB Reels, X) for an approved master clip."""
     clip_text = _slice_transcript_text(transcript, plan.start_trim, plan.end_trim)
+    eff_lang = transcript.language if (language == "auto" and transcript.language) else (language or "en")
+    pack = load_niche_pack(niche_id)
+    default_tags_str = " ".join(pack.visual_presets.default_hashtags)
     rag_ctx = ""
     try:
         rag_ctx = build_curator_rag_context(
@@ -755,6 +783,8 @@ def generate_clip_packaging(plan: EditPlan, transcript: AnnotatedTranscript, str
             topic_query=f"{plan.hook_headline} {plan.matched_lore_entity or ''} CTR curiosity gap cover",
             stage="packaging",
             max_tokens=550,
+            niche=pack.niche_id,
+            language=eff_lang,
         )
     except Exception:
         rag_ctx = ""
@@ -764,22 +794,23 @@ def generate_clip_packaging(plan: EditPlan, transcript: AnnotatedTranscript, str
         else ""
     )
     prompt = (
-        f"Generate algorithmic 5-network packaging for approved GTA VI clip_id='{plan.clip_id}' (streamer={streamer_id}).\n"
+        f"Generate algorithmic 5-network packaging for approved clip_id='{plan.clip_id}' "
+        f"(niche={pack.niche_id}, language={eff_lang}, creator={streamer_id}).\n"
         f"{rag_block}"
         f"Hook headline: {plan.hook_headline!r}\n"
-        f"Matched lore entity: {plan.matched_lore_entity!r}\n"
+        f"Matched context/lore entity: {plan.matched_lore_entity!r}\n"
         f"Duration: {plan.end_trim - plan.start_trim:.1f}s, voice_mode={plan.voice_mode}, dmca_clear={plan.dmca_clear}.\n"
-        f"Streamer transcript:\n{wrap_untrusted_source_data('clip_transcript', clip_text)}\n\n"
+        f"Speaker transcript:\n{wrap_untrusted_source_data('clip_transcript', clip_text)}\n\n"
         "Constraints:\n"
-        "- shorts_title: <= 60 characters, Tier-1 English, punchy, no AI-slop cliches.\n"
-        "- shorts_hashtags: 3 to 5 clean hashtags (include #GTA6 #Shorts).\n"
+        f"- shorts_title: <= 60 characters, target language='{eff_lang}', punchy, no AI-slop cliches.\n"
+        f"- shorts_hashtags: 3 to 5 clean hashtags (include {default_tags_str}).\n"
         "- suggested_on_screen_hook: <= 6 words (ideally 2-4 words complementary to title for cover).\n"
         "- tiktok_caption: 1 conversational line prompting benign debate.\n"
         "- reels_caption: short copy with save/DM share CTA (Sends Per Reach).\n"
         "- facebook_reels_caption: nostalgic or community-debate 1-2 line caption inviting shares/comments.\n"
-        "- x_post_text: punchy native 1-liner <= 220 chars, zero external links (link-in-reply only), max 1-2 hashtags (#GTA6).\n"
+        "- x_post_text: punchy native 1-liner <= 220 chars, zero external links (link-in-reply only), max 1-2 hashtags.\n"
         "- ab_hook_variants: 2 to 3 short alternative 0-3s visual hook texts (2-5 words each) for IG Trial Reels / TikTok A/B tests.\n"
-        "- author_reply_seed: 1 natural organic follow-up comment/question for the creator to reply manually on X (75x boost) or TikTok.\n"
+        "- author_reply_seed: 1 natural organic follow-up comment/question for the creator to reply manually on X or TikTok.\n"
         "- bounty_safe: true only if dmca_clear and voice_mode=='none'."
     )
     sys_inst = build_cached_system_instruction(
@@ -826,6 +857,9 @@ def curate_run(
     scene_research: bool = False,
     game: str = "GTA VI",
     max_clips: int | None = None,
+    *,
+    niche_id: str = DEFAULT_NICHE_ID,
+    language: str = "en",
 ) -> RunState:
     """Run Pass-1 + LR-ASD + Pass-2 curation over all transcribed slices in runs/<run_id>/."""
     state_path = run_dir / "state.json"
@@ -833,10 +867,9 @@ def curate_run(
     eff_policy: AudioPolicy = audio_policy or state.audio_policy or "strict_clean"
     state.audio_policy = eff_policy
 
-    voice_mode = os.getenv("VOICE_MODE", "none").strip() or "none"
-    if CHANNEL_PROFILE_PATH.exists():
-        cfg = yaml.safe_load(CHANNEL_PROFILE_PATH.read_text(encoding="utf-8")) or {}
-        voice_mode = str(cfg.get("voice", {}).get("mode", voice_mode))
+    chan_prof = load_channel_profile(CHANNEL_PROFILE_PATH)
+    voice_mode = os.getenv("VOICE_MODE", chan_prof.studio.voice_mode).strip() or chan_prof.studio.voice_mode
+    max_review_retries = int(chan_prof.clip_rules.max_review_retries)
 
     tr_map = {t.slice_id: t for t in state.transcripts}
     audits: list[SliceAuditResult] = []
@@ -902,10 +935,12 @@ def curate_run(
             run_dir,
             voice_mode=voice_mode,
             brief=brief,
-            max_retries=1,
+            max_retries=max_review_retries,
             streamer_id=state.streamer_id,
             audio_policy=eff_policy,
             scene_blueprint=bp,
+            niche_id=niche_id,
+            language=language,
         )
         critics.append(critic)
         print(

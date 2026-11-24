@@ -31,10 +31,17 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+from pydantic_ai import Agent, RunContext
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.db import DEFAULT_DB_PATH, PROJECT_ROOT, init_db, list_creators
+from src.llm_router import wrap_untrusted_source_data
+from src.logging_utils import get_logger
 from src.resource_guard import onnx_threads
 from src.runtime_paths import resolve_omni_rag_dir
+
+log = get_logger("rag_engine")
+AGENTIC_RERANK_FLOOR = 0.45
 
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 EMBEDDING_DIM = 384
@@ -1200,14 +1207,36 @@ def _get_qdrant_readonly_client() -> Any | None:
     try:
         from qdrant_client import QdrantClient
 
-        _QDRANT_CLIENT_CACHE = QdrantClient(url=url, api_key=api_key, timeout=6)
+        _QDRANT_CLIENT_CACHE = QdrantClient(url=url, api_key=api_key, timeout=12)
         return _QDRANT_CLIENT_CACHE
     except Exception:
         return None
 
 
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=0.5, min=0.5, max=3.0),
+)
+def _embed_vertex_768_with_timeout(proj: str, loc: str, query: str) -> list[float] | None:
+    from google import genai
+    from google.genai import types as genai_types
+
+    client = genai.Client(
+        vertexai=True,
+        project=proj,
+        location=loc,
+        http_options=genai_types.HttpOptions(timeout=12_000),
+    )
+    resp = client.models.embed_content(model="text-embedding-005", contents=query)
+    embs = getattr(resp, "embeddings", None) or []
+    if embs and getattr(embs[0], "values", None):
+        return [float(v) for v in embs[0].values]
+    return None
+
+
 def _embed_vertex_768_readonly(query: str) -> list[float] | None:
-    """Optional 768-d Vertex `text-embedding-005` query embedding for `hunthub_omni_rag_v5` read-only search."""
+    """Optional 768-d Vertex `text-embedding-005` query embedding (`timeout <= 20s`) for `hunthub_omni_rag_v5` read-only search."""
     proj = (os.getenv("GCP_PROJECT_ID") or "").strip()
     loc = (os.getenv("GCP_LOCATION") or "us-central1").strip() or "us-central1"
     if not proj:
@@ -1216,16 +1245,9 @@ def _embed_vertex_768_readonly(query: str) -> list[float] | None:
     if gac and not Path(gac).is_file():
         os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
     try:
-        from google import genai
-
-        client = genai.Client(vertexai=True, project=proj, location=loc)
-        resp = client.models.embed_content(model="text-embedding-005", contents=query)
-        embs = getattr(resp, "embeddings", None) or []
-        if embs and getattr(embs[0], "values", None):
-            return [float(v) for v in embs[0].values]
+        return _embed_vertex_768_with_timeout(proj, loc, query)
     except Exception:
         return None
-    return None
 
 
 def query_qdrant_readonly(
@@ -1318,26 +1340,62 @@ def query_qdrant_readonly(
     return hits
 
 
+_GTA_LOCAL_SOURCE_MARKERS = (
+    "gta6_",
+    "streamer_profiles.json",
+    "studio.db#creators",
+    "golden_references.json",
+    "viral_style_dna.json",
+    "runs/",
+)
+
+
+def _local_hit_matches_niche(hit: dict[str, Any], active_niche: str | None) -> bool:
+    """Prevent GTA VI local `studio.db` chunks from leaking when an operator queries non-GTA niches."""
+    if not active_niche or active_niche == "gaming_gta6":
+        return True
+    dom = str(hit.get("domain") or "")
+    src_p = str(hit.get("source_path") or "").replace("\\", "/").lower()
+    if dom == "gta6_streamers":
+        return False
+    return not any(m in src_p for m in _GTA_LOCAL_SOURCE_MARKERS)
+
+
 def _is_gta_lore_query(query: str, domain: str | None) -> bool:
     if domain == "gta6_streamers":
         return True
     return bool(_GTA_LORE_GUARD_RE.search(query or ""))
 
 
-def _passes_domain_guard(hit: dict[str, Any], query: str, domain: str | None, ce_logit: float) -> bool:
-    """Prevent external general books (e.g. C++ Game Engine Architecture by 'Jason' Gregory) from polluting GTA VI lore queries."""
+def _passes_domain_guard(
+    hit: dict[str, Any],
+    query: str,
+    domain: str | None,
+    ce_logit: float,
+    *,
+    active_niche: str | None = None,
+) -> bool:
+    """Prevent external general books (e.g. C++ Game Engine Architecture by 'Jason' Gregory) from polluting lore/news queries."""
     src = str(hit.get("source") or "")
-    if src == "studio_local":
-        return True
+    if src.startswith("qdrant_ssot:"):
+        hit_niche = str(hit.get("niche") or "global")
+        if active_niche and hit_niche not in {active_niche, "global"}:
+            return False
+        return ce_logit >= -10.0
 
-    # Strict minimum cross-encoder relevance threshold across all federated hits
+    if src == "studio_local":
+        return _local_hit_matches_niche(hit, active_niche)
+
+    # Strict minimum cross-encoder relevance threshold across all federated classic book hits
     if ce_logit < -5.5:
         return False
 
-    # If the caller explicitly requested local episodic_memory or gta6_streamers, or query is specific GTA VI lore:
+    # Isolate rag_library.sqlite / Omni-RAG from contaminating breaking AI news, episodic memory, or GTA VI lore
+    if active_niche == "ai_news" and any(k in (query or "").lower() for k in ("benchmark", "release", "2026", "model", "launch")):
+        return False
+
     if domain in {"gta6_streamers", "episodic_memory"} or _is_gta_lore_query(query, domain):
         hay = f"{hit.get('heading', '')} {hit.get('content', '')}"
-        # External hit is only allowed on a GTA VI lore query if it genuinely discusses GTA VI / streaming AND scores high
         if not _GTA_LORE_GUARD_RE.search(hay) or ce_logit < 1.5:
             return False
 
@@ -1537,6 +1595,287 @@ def format_rag_context(hits: list[dict[str, Any]], max_tokens: int = 550) -> str
     return "\n".join(lines)
 
 
+_REWRITE_FILLER_RE = re.compile(
+    r"\b(hey|pls|please|bro|che|onda|movida|cosa|stuff|thingy|tell|about|como|cómo|era|dime|explica|what|is|the|de|la|el|los|las|un|una)\b",
+    re.IGNORECASE,
+)
+
+_SYNONYM_EXPANSIONS_EN: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("anti-clipper", "anticlipper", "shadowban", "unoriginal", "reupload", "slop"), "YouTube Shorts Prioritizing Original Content Inauthentic Content Reused Content reach reduction 2026-10-01"),
+    (("engaged", "frame 0", "monetization", "pool", "ypp"), "YouTube Shorts Engaged Views vs Public Views YPP eligibility 10M"),
+    (("copy link", "twitter", "x algo", "pods", "cold start", "dwell"), "X x-algorithm home-mixer ShareViaCopyLinkWeight +20.0 ReplyWeight ColdStartMaxPostAgeSecs MinVideoDurationMs"),
+    (("whop", "bot score", "bounty", "burn", "kyc"), "Whop Content Rewards CPM eligibility 20%-80% burn rate Bot Score anti-fraud"),
+    (("standup", "stand-up", "comedian", "punchline", "crowd", "laugh", "pause"), "standup_comedy silence_trim_policy preserve_pauses pre-punchline pause crowd laughter retention"),
+    (("cinema", "movie", "film", "content id", "roformer"), "cinema_series strict_transformative_commentary use_bs_roformer Content ID commentary framing"),
+    (("c2pa", "clone", "likeness", "tiktok", "fyf"), "TikTok Creator Academy For You Feed FYF originality pHash C2PA Likeness Detection"),
+    (("andromeda", "trial reels", "dm", "sends", "mosseri"), "Meta AI System Cards Instagram Reels Chaining Sends Per Reach Originality Score 10 in 30 days Trial Reels"),
+    (("buckme", "6 star", "six star", "disguise", "leonida", "radio"), "GTA VI Leonida BuckMe 6-star wanted disguise plate swap Vice City DMCA radio"),
+)
+
+_SYNONYM_EXPANSIONS_ES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("castigo", "alcance", "resubida", "originalidad", "inautentico", "inauténtico", "anti-clipper"), "YouTube Shorts contenido original transformativo Contenido Inauténtico Vistas con Interacción 2026-10-01"),
+    (("enlace", "copiar", "algoritmo x", "twitter", "frio", "frío"), "Algoritmo Oficial X xai-org/x-algorithm ShareViaCopyLinkWeight +20.0 ColdStartMaxPostAgeSecs MinVideoDurationMs"),
+    (("whop", "campaña", "campana", "bots", "argentina", "latam", "cpm"), "Whop Content Rewards elegibilidad edad 18 KYC burn rate 20% 80% Bot Score Argentina LATAM"),
+    (("comedia", "chiste", "remate", "pausa", "risas", "standup", "stand-up"), "standup_comedy preserve_pauses silencios previos al remate risas de sala retención"),
+    (("tiktok", "para ti", "fyf", "groseria", "grosería", "clon", "c2pa"), "TikTok Creator Academy Para Ti FYF pHash OCR 0-7.5s C2PA Likeness Detection"),
+    (("instagram", "dm", "mensajes", "andromeda", "trial"), "Meta AI Instagram Reels Chaining Sends Per Reach Originalidad 10 en 30 días Trial Reels"),
+)
+
+
+def rewrite_rag_query(
+    query: str,
+    *,
+    niche: str = "gaming_gta6",
+    language: str = "en",
+    domain: str | None = None,
+    custom_rewriter: Callable[[str], str] | None = None,
+) -> str:
+    """Deterministic low-latency multi-hop query rewriter triggered when Hop-1 rerank score < 0.45."""
+    if custom_rewriter is not None:
+        rewritten_custom = custom_rewriter(query).strip()
+        if rewritten_custom:
+            return rewritten_custom
+
+    raw = (query or "").strip()
+    low = raw.lower()
+    lang_clean = (language or "en").strip().lower()
+    stripped = " ".join(_REWRITE_FILLER_RE.sub(" ", raw).split()).strip() or raw
+
+    table = _SYNONYM_EXPANSIONS_ES if lang_clean.startswith("es") else _SYNONYM_EXPANSIONS_EN
+    expansions: list[str] = []
+    for triggers, target_phrase in table:
+        if any(tok in low for tok in triggers):
+            expansions.append(target_phrase)
+
+    if not expansions:
+        dom_hint = (domain or "shortform_craft").replace("_", " ")
+        niche_hint = (niche or "global").replace("_", " ")
+        if lang_clean.startswith("es"):
+            expansions.append(f"{niche_hint} {dom_hint} retención gancho 0-3s políticas oficiales 2026")
+        else:
+            expansions.append(f"{niche_hint} {dom_hint} short-form retention hook official policy 2026")
+
+    combined = f"{stripped} {' '.join(expansions[:2])}".strip()
+    return " ".join(dict.fromkeys(combined.split()))
+
+
+def rag_query_agentic(
+    query: str,
+    niche: str = "gaming_gta6",
+    language: str = "en",
+    domain: str | None = None,
+    allow_federated: bool = True,
+    max_hops: int = 2,
+    *,
+    top_k: int = 5,
+    max_tokens: int = 550,
+    min_rerank_score: float = AGENTIC_RERANK_FLOOR,
+    db_path: Path = DEFAULT_DB_PATH,
+    omni_dir: Path | None = None,
+    qdrant_client: Any | None = None,
+    embed_fn: EmbedFn | None = None,
+    embed_768_fn: Any | None = None,
+    rerank_fn: RerankFn | None = None,
+    rewrite_fn: Callable[[str], str] | None = None,
+) -> dict[str, Any]:
+    """Multi-hop Agentic RAG engine prioritizing Qdrant Cloud SSOT (`clipping_studio_empirical`) with strict niche/language isolation and automatic query rewrite on score < 0.45."""
+    from src.qdrant_knowledge import query_empirical_qdrant
+
+    active_niche = (niche or "gaming_gta6").strip().lower()
+    eff_lang = (language or "en").strip().lower()
+    eff_hops = max(1, min(3, int(max_hops)))
+    safe_budget = min(550, max(120, int(max_tokens)))
+
+    cur_query = (query or "").strip()
+    if not cur_query:
+        return {
+            "query": "",
+            "final_query": "",
+            "niche": active_niche,
+            "language": eff_lang,
+            "domain": domain,
+            "hops_executed": 0,
+            "queries_tried": [],
+            "rewritten": False,
+            "top_rerank_score": 0.0,
+            "hits": [],
+            "formatted_context": "",
+        }
+
+    queries_tried: list[str] = []
+    merged_by_cid: dict[str, dict[str, Any]] = {}
+    top_overall_score = 0.0
+    hops_executed = 0
+
+    for hop_idx in range(1, eff_hops + 1):
+        hops_executed = hop_idx
+        queries_tried.append(cur_query)
+
+        # 1. Primary SSOT leg: Qdrant Cloud `clipping_studio_empirical` pre-filtered by `niche in [active_niche, "global"]` + `language`
+        cand_pool: list[dict[str, Any]] = query_empirical_qdrant(
+            cur_query,
+            niche=active_niche,
+            language=eff_lang,
+            domain=domain,
+            top_k=max(4, top_k * 2),
+            client=qdrant_client,
+            embed_768_fn=embed_768_fn,
+        )
+
+        # 2. Local SQLite `runs/studio.db` leg (skills, canonical bibles, episodic memory) strictly isolated by niche
+        if eff_lang in {"en", "auto"} or not cand_pool:
+            local_hits = query_rag(
+                cur_query,
+                domain=domain,
+                top_k=max(3, top_k),
+                federated=False,
+                db_path=db_path,
+                embed_fn=embed_fn,
+                use_vectors=True,
+                include_qdrant=False,
+            )
+            cand_pool.extend([h for h in local_hits if _local_hit_matches_niche(h, active_niche)])
+
+        # 3. Read-only Federated Canon (`rag_library.sqlite` 290 books + `hunthub_omni_rag_v5`) — skipped on lore/episodic/news to prevent contamination
+        is_isolated_topic = (
+            domain in {"gta6_streamers", "episodic_memory"}
+            or _is_gta_lore_query(cur_query, domain)
+            or active_niche == "ai_news"
+        )
+        if allow_federated and not is_isolated_topic:
+            cand_pool.extend(query_omni_rag_federated(cur_query, limit=max(3, top_k), omni_dir=omni_dir))
+            cand_pool.extend(query_qdrant_readonly(cur_query, limit=3, embed_fn=embed_fn))
+
+        dedup_hop: list[dict[str, Any]] = []
+        seen_hop: set[str] = set()
+        for item in cand_pool:
+            cid = str(item["chunk_id"])
+            if cid not in seen_hop:
+                seen_hop.add(cid)
+                dedup_hop.append(item)
+
+        hop_best = 0.0
+        if dedup_hop:
+            docs_for_ce = [f"{h.get('heading', '')}\n{str(h.get('content', ''))[:900]}" for h in dedup_hop]
+            logits = score_cross_encoder(cur_query, docs_for_ce, rerank_fn=rerank_fn)
+            for h, logit in zip(dedup_hop, logits, strict=True):
+                if not _passes_domain_guard(h, cur_query, domain, logit, active_niche=active_niche):
+                    continue
+                ce_prob = _sigmoid(logit)
+                q_score = float(h.get("qdrant_score") or 0.0)
+                src_tag = str(h.get("source") or "")
+                # Calibrate multilingual 768d Qdrant SSOT hits for non-English queries when using English MS-MARCO CrossEncoder
+                if (
+                    rerank_fn is None
+                    and not eff_lang.startswith("en")
+                    and src_tag.startswith("qdrant_ssot:")
+                    and q_score >= 0.64
+                ):
+                    scaled_q = min(1.0, max(0.0, (q_score - 0.30) / 0.58))
+                    eff_score = round(max(ce_prob, 0.35 * ce_prob + 0.65 * scaled_q), 6)
+                else:
+                    eff_score = round(ce_prob, 6)
+
+                enriched = dict(h)
+                enriched["rerank_logit"] = round(float(logit), 4)
+                enriched["rerank_score"] = eff_score
+                enriched["hop"] = hop_idx
+                hop_best = max(hop_best, eff_score)
+
+                prev_item = merged_by_cid.get(str(enriched["chunk_id"]))
+                if prev_item is None or eff_score > float(prev_item.get("rerank_score") or 0.0):
+                    merged_by_cid[str(enriched["chunk_id"])] = enriched
+
+        top_overall_score = max(top_overall_score, hop_best)
+        if hop_best >= min_rerank_score or hop_idx >= eff_hops:
+            break
+
+        next_query = rewrite_rag_query(
+            query,
+            niche=active_niche,
+            language=eff_lang,
+            domain=domain,
+            custom_rewriter=rewrite_fn,
+        )
+        if not next_query or next_query == cur_query:
+            break
+        cur_query = next_query
+
+    ranked_all = sorted(
+        merged_by_cid.values(),
+        key=lambda x: (
+            1 if str(x.get("source", "")).startswith("qdrant_ssot:") and float(x.get("rerank_score") or 0.0) >= min_rerank_score else 0,
+            float(x.get("rerank_score") or 0.0),
+            float(x.get("rrf_score") or 0.0),
+        ),
+        reverse=True,
+    )
+    top_hits = ranked_all[:top_k]
+    formatted = format_rag_context(top_hits, max_tokens=safe_budget)
+
+    log.info(
+        "rag_query_agentic_completed",
+        niche=active_niche,
+        language=eff_lang,
+        domain=domain,
+        hops_executed=hops_executed,
+        rewritten=hops_executed > 1,
+        top_rerank_score=round(top_overall_score, 4),
+        hit_count=len(top_hits),
+    )
+    return {
+        "query": query,
+        "final_query": cur_query,
+        "niche": active_niche,
+        "language": eff_lang,
+        "domain": domain,
+        "hops_executed": hops_executed,
+        "queries_tried": queries_tried,
+        "rewritten": hops_executed > 1,
+        "top_rerank_score": round(top_overall_score, 6),
+        "hits": top_hits,
+        "formatted_context": formatted,
+    }
+
+
+def attach_rag_agent_tool(
+    agent: Agent[Any, Any],
+    *,
+    default_niche: str = "gaming_gta6",
+    default_language: str = "en",
+    db_path: Path = DEFAULT_DB_PATH,
+) -> Any:
+    """Register `rag_query_agentic` directly as a `@agent.tool` on a `pydantic-ai` `Agent` (`timeout <= 20s`)."""
+
+    @agent.tool(name="rag_query_agentic", timeout=20.0)
+    def _rag_tool(
+        _ctx: RunContext[Any],
+        query: str,
+        niche: str = default_niche,
+        language: str = default_language,
+        domain: str | None = None,
+        allow_federated: bool = True,
+        max_hops: int = 2,
+    ) -> str:
+        """Query governed Qdrant Cloud SSOT + Studio RAG with strict niche/language isolation and automatic multi-hop query rewrite."""
+        res = rag_query_agentic(
+            query=query,
+            niche=niche or default_niche,
+            language=language or default_language,
+            domain=domain,
+            allow_federated=allow_federated,
+            max_hops=max_hops,
+            max_tokens=550,
+            db_path=db_path,
+        )
+        ctx_txt = str(res.get("formatted_context") or "").strip()
+        if not ctx_txt:
+            return "NO_RELEVANT_RAG_HITS"
+        return wrap_untrusted_source_data("agentic_rag_tool", ctx_txt)
+
+    return _rag_tool
+
+
 def build_curator_rag_context(
     streamer_id: str,
     topic_query: str,
@@ -1545,18 +1884,39 @@ def build_curator_rag_context(
     db_path: Path = DEFAULT_DB_PATH,
     use_vectors: bool = True,
     federated: bool = False,
+    *,
+    niche: str = "gaming_gta6",
+    language: str = "en",
 ) -> str:
-    """Retrieve bounded RAG context (streamer profile + episodic winners/errors + craft/CTR rules) for curator.py."""
+    """Retrieve bounded RAG context (`<= 550` tokens) combining creator/niche profile, episodic memory, and Qdrant Cloud SSOT."""
+    safe_tokens = min(550, max(120, int(max_tokens)))
     hits: list[dict[str, Any]] = []
-    hits.extend(
-        query_rag(
+    active_niche = (niche or "gaming_gta6").strip().lower()
+    eff_lang = (language or "en").strip().lower()
+
+    if active_niche == "gaming_gta6":
+        prof_res = rag_query_agentic(
             f"{streamer_id} profile hook pacing",
+            niche="gaming_gta6",
+            language=eff_lang,
             domain="gta6_streamers",
+            allow_federated=False,
+            max_hops=1,
             top_k=1,
             db_path=db_path,
-            use_vectors=use_vectors,
         )
-    )
+        hits.extend(prof_res["hits"])
+        if not hits:
+            hits.extend(
+                query_rag(
+                    f"{streamer_id} profile hook pacing",
+                    domain="gta6_streamers",
+                    top_k=1,
+                    db_path=db_path,
+                    use_vectors=use_vectors,
+                )
+            )
+
     hits.extend(
         query_rag(
             f"{streamer_id} {topic_query} WINNER REJECTED_ERROR",
@@ -1567,24 +1927,28 @@ def build_curator_rag_context(
         )
     )
     target_domain = "design_ctr" if stage == "packaging" else "shortform_craft"
-    hits.extend(
-        query_rag(
-            topic_query or "hook retention seamless loop curiosity gap",
-            domain=target_domain,
-            top_k=2,
-            federated=federated,
-            db_path=db_path,
-            use_vectors=use_vectors,
-        )
+    craft_res = rag_query_agentic(
+        topic_query or "hook retention seamless loop curiosity gap",
+        niche=active_niche,
+        language=eff_lang,
+        domain=target_domain,
+        allow_federated=federated,
+        max_hops=2,
+        top_k=2,
+        db_path=db_path,
     )
+    hits.extend(craft_res["hits"])
+
     seen: set[str] = set()
     unique: list[dict[str, Any]] = []
     for h in hits:
+        if not _local_hit_matches_niche(h, active_niche):
+            continue
         cid = str(h["chunk_id"])
         if cid not in seen:
             seen.add(cid)
             unique.append(h)
-    return format_rag_context(unique, max_tokens=max_tokens)
+    return format_rag_context(unique, max_tokens=safe_tokens)
 
 
 def inspect_rag_status(db_path: Path = DEFAULT_DB_PATH, omni_dir: Path | None = None) -> dict[str, Any]:

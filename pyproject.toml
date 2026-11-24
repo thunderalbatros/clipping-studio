@@ -4,16 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clipping-studio"
-version = "3.6.0"
-description = "Automated Senior-grade 9:16 & 16:9 viral clipping studio (anti-AI slop, 1080p60 CFR, Motion-Graphics Alpha, PySceneDetect, Scene-Match Intelligence, LR-ASD, YAMNet ONNX, 3-Level Federated RAG, Visual QA Evals)"
+version = "4.0.0b1"
+description = "Universal Multi-Niche & Multi-Language 9:16/16:9 Clipping Studio (NichePack, Qdrant Cloud SSOT, Multi-Hop Agentic RAG, 1080p60 CFR, Visual QA >= 0.78)"
 requires-python = ">=3.12"
 dependencies = [
     "auto-editor>=29.0.0",
     "chonkie>=1.7.0",
     "curl-cffi>=0.17.0",
-    "fastembed>=0.9.0",
+    "fastembed==0.9.1",
     "ffmpeg-normalize>=1.45.0",
-    "google-genai>=2.30.0,<3.0.0",
+    "google-genai>=2.30.0,<4.0.0",
     "huggingface-hub>=1.30.0",
     "numpy>=2.5.0",
     "onnx-asr>=0.12.0",
@@ -23,8 +23,9 @@ dependencies = [
     "pillow>=13.0.0",
     "psutil>=7.0.0",
     "pydantic>=2.14.0",
-    "pydantic-ai-slim[google,groq]>=2.71.0",
+    "pydantic-ai-slim[google,groq]==2.71.0",
     "pydantic-evals>=2.71.0",
+    "pydantic-settings>=2.8.0",
     "pysubs2>=1.9.1",
     "python-dotenv>=1.2.0",
     "pyyaml>=6.0.4",
@@ -33,7 +34,8 @@ dependencies = [
     "requests>=2.34.0",
     "safehttpx<=0.1.7",
     "scenedetect>=0.6.7",
-    "sqlite-vec>=0.1.6",
+    "sqlite-vec==0.1.9",
+    "structlog>=25.1.0",
     "tenacity>=9.1.0",
     "websockets>=17.4",
     "yt-dlp>=2026.10.26",
@@ -44,7 +46,10 @@ packages = ["src", "evals"]
 
 [project.optional-dependencies]
 dev = [
+    "bandit>=1.8.0",
+    "pip-audit>=2.8.0",
     "pytest>=8.3.0",
+    "pytest-cov>=6.0.0",
     "ruff>=0.17.0",
 ]
 

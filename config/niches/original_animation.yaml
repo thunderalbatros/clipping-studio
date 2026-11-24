@@ -1,0 +1,38 @@
+niche_id: "original_animation"
+display_name: "Original Animation & Indie Visual Storytelling"
+description: "Original 2D/3D animated shorts and indie motion stories preserving frame-exact visual choreography."
+production_ready: false
+languages: ["en", "es"]
+target_platforms:
+  - "youtube_shorts"
+  - "tiktok"
+  - "instagram_reels"
+  - "x"
+  - "youtube_long"
+framing_mode: "cinematic_transformative"
+silence_trim_policy: "preserve_pauses"
+audio_pipeline:
+  use_bs_roformer: false
+  use_deepfilternet: false
+  preserve_crowd_laughter: false
+  default_audio_policy: "keep_original"
+asr_engine_preference: "faster_whisper_l4"
+diarization_required: true
+copyright_guard: "standard_dmca"
+visual_presets:
+  badge_label: "ANIMATION"
+  accent_color: "#A855F7"
+  caption_style: "subtitle_minimal"
+  motion_graphics_engine: "none"
+  broll_or_diagram_mode: "none"
+  allowed_scene_types: ["cutscene", "active_gameplay"]
+  default_hashtags: ["#Animation", "#IndieAnimation", "#Shorts"]
+  qa_special_rules:
+    - "Zero jump-cut destruction of animated visual beats or purposeful silent acting pauses."
+    - "Subtitles must remain minimal and unobtrusive so character acting and framing stay clean."
+min_qa_overall: 0.78
+rag_domains:
+  - "shortform_craft"
+  - "design_ctr"
+  - "episodic_memory"
+lore_source: null

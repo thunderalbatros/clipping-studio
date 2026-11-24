@@ -124,7 +124,7 @@ def test_psutil_resource_guard_and_unload_heavy_models() -> None:
     snap = snapshot()
     assert snap["total_ram_mb"] > 512
     assert 0.0 <= float(snap["used_ram_pct"]) <= 100.0
-    allowed, reason, _ = heavy_local_allowed(min_free_ram_mb=64, min_free_disk_gb=0.1)
+    allowed, reason, _ = heavy_local_allowed(min_free_ram_mb=64, max_used_ram_pct=99.9, min_free_disk_gb=0.1)
     assert allowed is True
     assert reason == "resources healthy"
 

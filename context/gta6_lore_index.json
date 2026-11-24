@@ -1,7 +1,10 @@
 {
   "game": "Grand Theft Auto VI",
   "release_date": "2026-11-19",
-  "platforms": ["PlayStation 5", "Xbox Series X|S"],
+  "platforms": [
+    "PlayStation 5",
+    "Xbox Series X|S"
+  ],
   "setting": {
     "state": "Leonida",
     "regions": [
@@ -18,160 +21,619 @@
   },
   "characters": {
     "protagonists": [
-      {"name": "Jason Duval", "role": "Co-protagonist, ex-military / criminal partner to Lucia"},
-      {"name": "Lucia Caminos", "role": "Co-protagonist, recently released from Leonida Penitentiary"}
+      {
+        "name": "Jason Duval",
+        "role": "Co-protagonist, ex-military / criminal partner to Lucia"
+      },
+      {
+        "name": "Lucia Caminos",
+        "role": "Co-protagonist, recently released from Leonida Penitentiary"
+      }
     ],
     "key_npcs": [
-      {"name": "Brian Heder", "role": "Veteran Keys smuggler and landlord"},
-      {"name": "Cal Hampton", "role": "Jason's paranoid conspiracy-theorist friend"},
-      {"name": "Boobie Ike", "role": "Vice City real-estate & nightclub mogul"},
-      {"name": "Dre'Quan Priest", "role": "Only Raw Records hustler & music promoter"},
-      {"name": "Real Dimez (Bae-Luxe & Roxy)", "role": "Viral Leonida rap duo"},
-      {"name": "Raul Bautista", "role": "Seasoned bank heist planner"}
+      {
+        "name": "Brian Heder",
+        "role": "Veteran Keys smuggler and landlord"
+      },
+      {
+        "name": "Cal Hampton",
+        "role": "Jason's paranoid conspiracy-theorist friend"
+      },
+      {
+        "name": "Boobie Ike",
+        "role": "Vice City real-estate & nightclub mogul"
+      },
+      {
+        "name": "Dre'Quan Priest",
+        "role": "Only Raw Records hustler & music promoter"
+      },
+      {
+        "name": "Real Dimez (Bae-Luxe & Roxy)",
+        "role": "Viral Leonida rap duo"
+      },
+      {
+        "name": "Raul Bautista",
+        "role": "Seasoned bank heist planner"
+      }
     ]
   },
   "chapters": [
     {
       "chapter": 1,
       "title": "Just Like Paradise",
-      "iconic_missions": ["Prologue", "Swamped", "Discharge Time"]
+      "iconic_missions": [
+        "Prologue",
+        "Swamped",
+        "Discharge Time"
+      ]
     },
     {
       "chapter": 2,
       "title": "Paradise Lost",
-      "iconic_missions": ["Coffee Break", "Checking Out"]
+      "iconic_missions": [
+        "Coffee Break",
+        "Checking Out"
+      ]
     },
     {
       "chapter": 3,
       "title": "Tits, Ass, Drug Money",
-      "iconic_missions": ["Welcome to Vice City", "Boobie Time", "Sinfrontera National Bank", "The Cartel Heist"]
+      "iconic_missions": [
+        "Welcome to Vice City",
+        "Boobie Time",
+        "Sinfrontera National Bank",
+        "The Cartel Heist"
+      ]
     },
     {
       "chapter": 4,
       "title": "Vice City, Baby",
-      "iconic_missions": ["Ocean Beach", "VCIA Takedown"]
+      "iconic_missions": [
+        "Ocean Beach",
+        "VCIA Takedown"
+      ]
     },
     {
       "chapter": 5,
       "title": "Top of the World, Ma",
-      "iconic_missions": ["The End of the Road"]
+      "iconic_missions": [
+        "The End of the Road"
+      ]
     }
   ],
   "easter_eggs": [
     {
       "id": "ee_dexter",
       "title": "Dexter Morgan Tribute",
-      "locations": ["Trinity Apartments (Washington Island)", "Kill Room (Surfside Drive)", "Lure Predator Boat", "Underwater trash bags"],
-      "keywords": ["dexter", "trinity apartments", "kill room", "lure predator", "trash bags", "blood slides"]
+      "locations": [
+        "Trinity Apartments (Washington Island)",
+        "Kill Room (Surfside Drive)",
+        "Lure Predator Boat",
+        "Underwater trash bags"
+      ],
+      "keywords": [
+        "dexter",
+        "trinity apartments",
+        "kill room",
+        "lure predator",
+        "trash bags",
+        "blood slides"
+      ]
     },
     {
       "id": "ee_radio_tower_egg",
       "title": "Literal Easter Egg at South Vice-Dale Radio Tower",
-      "locations": ["South Vice-Dale County Radio Tower"],
-      "keywords": ["radio tower", "easter egg", "throw the egg", "south vice-dale", "secret cutscene"]
+      "locations": [
+        "South Vice-Dale County Radio Tower"
+      ],
+      "keywords": [
+        "radio tower",
+        "easter egg",
+        "throw the egg",
+        "south vice-dale",
+        "secret cutscene"
+      ]
     },
     {
       "id": "ee_area_51_ufo",
       "title": "Underground Area 51 Base & UFO Abduction",
-      "locations": ["Underground Military Base"],
-      "keywords": ["area 51", "2341", "ufo", "abduction", "alien dreams", "keypad"]
+      "locations": [
+        "Underground Military Base"
+      ],
+      "keywords": [
+        "area 51",
+        "2341",
+        "ufo",
+        "abduction",
+        "alien dreams",
+        "keypad"
+      ]
     },
     {
       "id": "ee_skunk_ape",
       "title": "Skunk Ape Cryptid",
-      "locations": ["Skeeter's", "Gullet Marsh", "Grassrivers"],
-      "keywords": ["skunk ape", "gullet marsh", "skeeter", "swamp monster", "cryptid"]
+      "locations": [
+        "Skeeter's",
+        "Gullet Marsh",
+        "Grassrivers"
+      ],
+      "keywords": [
+        "skunk ape",
+        "gullet marsh",
+        "skeeter",
+        "swamp monster",
+        "cryptid"
+      ]
     },
     {
       "id": "ee_bigfoot",
       "title": "Bigfoot Encounter",
-      "locations": ["Mount Kalaga"],
-      "keywords": ["bigfoot", "sasquatch", "mount kalaga"]
+      "locations": [
+        "Mount Kalaga"
+      ],
+      "keywords": [
+        "bigfoot",
+        "sasquatch",
+        "mount kalaga"
+      ]
     },
     {
       "id": "ee_arthur_morgan_hat",
       "title": "Arthur Morgan's Hat (RDR2)",
-      "locations": ["Port Gellhorn"],
-      "keywords": ["arthur morgan", "red dead", "cowboy hat", "port gellhorn"]
+      "locations": [
+        "Port Gellhorn"
+      ],
+      "keywords": [
+        "arthur morgan",
+        "red dead",
+        "cowboy hat",
+        "port gellhorn"
+      ]
     },
     {
       "id": "ee_loosy_dog",
       "title": "Loosy the Jet-Ski Golden Retriever",
-      "locations": ["Vice City Beach / Keys"],
-      "keywords": ["loosy", "golden retriever", "dog on jet ski", "dog jet ski"]
+      "locations": [
+        "Vice City Beach / Keys"
+      ],
+      "keywords": [
+        "loosy",
+        "golden retriever",
+        "dog on jet ski",
+        "dog jet ski"
+      ]
     },
     {
       "id": "ee_orange_cat",
       "title": "Aggressive Orange Cat in Stolen Cars",
-      "locations": ["Vice City / Random Stolen Vehicles"],
-      "keywords": ["orange cat", "cat in car", "cat attacked", "stolen car cat"]
+      "locations": [
+        "Vice City / Random Stolen Vehicles"
+      ],
+      "keywords": [
+        "orange cat",
+        "cat in car",
+        "cat attacked",
+        "stolen car cat"
+      ]
     },
     {
       "id": "ee_michaels_yacht",
       "title": "Michael De Santa's Stolen Yacht (GPS to Los Santos)",
-      "locations": ["Leonida Marina / Open Water"],
-      "keywords": ["michael", "yacht", "los santos", "gps", "gta 5"]
+      "locations": [
+        "Leonida Marina / Open Water"
+      ],
+      "keywords": [
+        "michael",
+        "yacht",
+        "los santos",
+        "gps",
+        "gta 5"
+      ]
     },
     {
       "id": "ee_pink_meteorite",
       "title": "Pink Meteorite",
-      "locations": ["Mount Kalaga"],
-      "keywords": ["meteorite", "pink meteor", "mount kalaga", "crater"]
+      "locations": [
+        "Mount Kalaga"
+      ],
+      "keywords": [
+        "meteorite",
+        "pink meteor",
+        "mount kalaga",
+        "crater"
+      ]
     },
     {
       "id": "ee_lethal_by_design",
       "title": "Lethal by Design Book (GTA IV Reference)",
-      "locations": ["Safehouse / Bookstores"],
-      "keywords": ["lethal by design", "gta 4", "gta iv", "niko"]
+      "locations": [
+        "Safehouse / Bookstores"
+      ],
+      "keywords": [
+        "lethal by design",
+        "gta 4",
+        "gta iv",
+        "niko"
+      ]
     }
   ],
   "viral_launch_bugs": [
     {
       "id": "bug_prison_floor_clip",
       "title": "Lucia Prison Floor Escape Glitch",
-      "keywords": ["prison", "fell through", "under the floor", "escaped jail", "lucia"]
+      "keywords": [
+        "prison",
+        "fell through",
+        "under the floor",
+        "escaped jail",
+        "lucia"
+      ]
     },
     {
       "id": "bug_highway_boats",
       "title": "Boats & Yachts Spawning on Highways",
-      "keywords": ["boat on highway", "yacht on road", "ship on street", "boat driving"]
+      "keywords": [
+        "boat on highway",
+        "yacht on road",
+        "ship on street",
+        "boat driving"
+      ]
     },
     {
       "id": "bug_ghost_motorcycles",
       "title": "Driverless Ghost Motorcycles",
-      "keywords": ["no driver", "ghost bike", "motorcycle by itself"]
+      "keywords": [
+        "no driver",
+        "ghost bike",
+        "motorcycle by itself"
+      ]
     },
     {
       "id": "bug_instant_wardrobe",
       "title": "Instant Wardrobe Swap Glitch",
-      "keywords": ["clothes changed", "wardrobe glitch", "outfit vanished"]
+      "keywords": [
+        "clothes changed",
+        "wardrobe glitch",
+        "outfit vanished"
+      ]
     },
     {
       "id": "bug_npc_teleport_phone_void",
       "title": "NPC Teleportation & Phone-Crash Under-Map Void",
-      "keywords": ["under the map", "teleported", "pulled out phone", "falling forever", "void"]
+      "keywords": [
+        "under the map",
+        "teleported",
+        "pulled out phone",
+        "falling forever",
+        "void"
+      ]
     }
   ],
   "brief_triggers": {
     "sustos_y_caos": {
-      "keywords_transcript": ["oh shit", "what the fuck", "no way", "holy shit", "watch out", "alligator", "gator", "cops", "wasted", "crash", "explode", "jumpscare", "cat"],
-      "visual_cues": ["high-speed crash", "police 5-star swarm", "alligator ambush", "helicopter explosion", "streamer jumping back"]
+      "keywords_transcript": [
+        "oh shit",
+        "what the fuck",
+        "no way",
+        "holy shit",
+        "watch out",
+        "alligator",
+        "gator",
+        "cops",
+        "wasted",
+        "crash",
+        "explode",
+        "jumpscare",
+        "cat"
+      ],
+      "visual_cues": [
+        "high-speed crash",
+        "police 5-star swarm",
+        "alligator ambush",
+        "helicopter explosion",
+        "streamer jumping back"
+      ]
     },
     "secretos_y_easter_eggs": {
-      "keywords_transcript": ["dexter", "area 51", "2341", "ufo", "alien", "skunk ape", "bigfoot", "arthur", "red dead", "michael", "los santos", "meteorite", "secret", "easter egg"],
-      "visual_cues": ["keypad code entry", "underground bunker", "ufo beam", "hidden room", "cryptid silhouette", "unique collectible"]
+      "keywords_transcript": [
+        "dexter",
+        "area 51",
+        "2341",
+        "ufo",
+        "alien",
+        "skunk ape",
+        "bigfoot",
+        "arthur",
+        "red dead",
+        "michael",
+        "los santos",
+        "meteorite",
+        "secret",
+        "easter egg"
+      ],
+      "visual_cues": [
+        "keypad code entry",
+        "underground bunker",
+        "ufo beam",
+        "hidden room",
+        "cryptid silhouette",
+        "unique collectible"
+      ]
     },
     "bugs_virales": {
-      "keywords_transcript": ["bug", "glitch", "broken", "fell through", "under the map", "floating", "stuck", "ragdoll", "physics", "rockstar"],
-      "visual_cues": ["vehicle launched into sky", "boat on road", "character clipping through floor", "ragdoll spinning", "ghost vehicle"]
+      "keywords_transcript": [
+        "bug",
+        "glitch",
+        "broken",
+        "fell through",
+        "under the map",
+        "floating",
+        "stuck",
+        "ragdoll",
+        "physics",
+        "rockstar"
+      ],
+      "visual_cues": [
+        "vehicle launched into sky",
+        "boat on road",
+        "character clipping through floor",
+        "ragdoll spinning",
+        "ghost vehicle"
+      ]
     },
     "atracos_y_accion": {
-      "keywords_transcript": ["bank", "heist", "vault", "cartel", "getaway", "chopper", "helicopter", "shootout", "sniper", "rpg", "escape"],
-      "visual_cues": ["Sinfrontera National Bank vault", "armored truck shootout", "helicopter chase", "jet ski escape", "explosions"]
+      "keywords_transcript": [
+        "bank",
+        "heist",
+        "vault",
+        "cartel",
+        "getaway",
+        "chopper",
+        "helicopter",
+        "shootout",
+        "sniper",
+        "rpg",
+        "escape"
+      ],
+      "visual_cues": [
+        "Sinfrontera National Bank vault",
+        "armored truck shootout",
+        "helicopter chase",
+        "jet ski escape",
+        "explosions"
+      ]
     },
     "cinematicas_reaccion": {
-      "keywords_transcript": ["graphics", "insane", "cinema", "no way they did that", "lucia", "jason", "detail", "water"],
-      "visual_cues": ["streamer jaw drop during dramatic reveal", "active reaction commentary over iconic scene"]
+      "keywords_transcript": [
+        "graphics",
+        "insane",
+        "cinema",
+        "no way they did that",
+        "lucia",
+        "jason",
+        "detail",
+        "water"
+      ],
+      "visual_cues": [
+        "streamer jaw drop during dramatic reveal",
+        "active reaction commentary over iconic scene"
+      ]
     }
-  }
+  },
+  "schema_version": "2.0",
+  "updated_at": "2026-11-24",
+  "endings_and_social_systems": [
+    {
+      "id": "sys_buckme_social",
+      "title": "BuckMe In-Game Creator & Bounty App",
+      "keywords": [
+        "buckme",
+        "in-game livestream",
+        "bounty app",
+        "viral challenge",
+        "clout meter",
+        "leonida man"
+      ],
+      "summary": "GTA VI's in-world viral video & stunt-bounty feed ('BuckMe') where NPCs record chaotic street stunts, police chases, and endgame fame/infamy reactions.",
+      "effective_date": "2026-11-24"
+    },
+    {
+      "id": "ending_dual_trust_paths",
+      "title": "Chapter 5 Endgame Paths ('The End of the Road' — Partner Trust vs. Solo Cut)",
+      "keywords": [
+        "the end of the road",
+        "final heist",
+        "jason and lucia ending",
+        "betrayal",
+        "ankle monitor",
+        "keys escape"
+      ],
+      "summary": "High-stakes endgame branches driven by Jason Duval and Lucia Caminos trust decisions after the Sinfrontera & VCIA crackdowns—prime emotional reaction clips.",
+      "effective_date": "2026-11-24"
+    }
+  ],
+  "gameplay_systems_day5": [
+    {
+      "id": "sys_6_star_disguises",
+      "title": "6-Star Wanted Escalation, Tactical Recognition & Disguise / Plate-Swap Evasion",
+      "keywords": [
+        "6 stars",
+        "six stars",
+        "military",
+        "police recognition",
+        "vehicle description",
+        "change clothes",
+        "disguise",
+        "license plate",
+        "cctv"
+      ],
+      "summary": "Leonida law enforcement tracks last-seen vehicle description, license plates, and outfit witnesses before locking 6-star tactical/military pursuit; swapping clothes/vehicles out of sight breaks visual lock.",
+      "effective_date": "2026-11-24"
+    }
+  ],
+  "dmca_risk_radio_stations": [
+    {
+      "id": "radio_flash_fm_vrock_dmca",
+      "title": "Vice City Licensed Radio & Nightclub Audio (High Content ID / DMCA Risk)",
+      "keywords": [
+        "flash fm",
+        "emotion 98.3",
+        "v-rock",
+        "fever 105",
+        "only raw records",
+        "boobie ike club",
+        "car radio"
+      ],
+      "dmca_policy_action": "Strictly enforce YAMNet music_prob_peak < 0.45 under strict_clean / sound_campaign; trim around vehicle radio segments or route slice to GPU BS-RoFormer vocal isolation in Phase B2.",
+      "effective_date": "2026-11-24"
+    }
+  ],
+  "leonida_key_locations_expanded": [
+    {
+      "name": "Leonida Penitentiary",
+      "region": "Leonida",
+      "clip_triggers": [
+        "prologue",
+        "discharge",
+        "prison glitch"
+      ]
+    },
+    {
+      "name": "Vice-Dale County & Ocean Beach",
+      "region": "Vice City",
+      "clip_triggers": [
+        "neon strip",
+        "supercar chase",
+        "buckme"
+      ]
+    },
+    {
+      "name": "Port Gellhorn Docks & Motels",
+      "region": "Port Gellhorn",
+      "clip_triggers": [
+        "robbery",
+        "coast guard",
+        "ambush"
+      ]
+    },
+    {
+      "name": "Grassrivers Airboat Marshes",
+      "region": "Grassrivers",
+      "clip_triggers": [
+        "alligator",
+        "skunk ape",
+        "airboat"
+      ]
+    },
+    {
+      "name": "Leonida Keys Causeway",
+      "region": "Leonida Keys",
+      "clip_triggers": [
+        "bridge jump",
+        "boat highway",
+        "smuggler"
+      ]
+    },
+    {
+      "name": "Mount Kalaga National Park",
+      "region": "Mount Kalaga",
+      "clip_triggers": [
+        "bigfoot",
+        "pink meteorite",
+        "offroad cliff"
+      ]
+    }
+  ],
+  "live_wiki_extracts": [
+    {
+      "id": "wiki_grand_theft_auto_vi",
+      "title": "Grand Theft Auto VI",
+      "source_url": "https://gta.fandom.com/wiki/Grand_Theft_Auto_VI",
+      "effective_date": "2026-11-24",
+      "clean_extract": "Grand Theft Auto VI (also known as Grand Theft Auto 6, GTA 6 or GTA VI) is the seventeenth and latest installment in the Grand Theft Auto series and the seventh title in the HD Universe. It was released on November 19, 2026, published by Rockstar Games. A PC release date has yet to be confirmed. During Take-Two Interactive's annual shareholder meeting on September 17, 2026, CEO Strauss Zelnick stated that \"the PC platform is becoming more and more important to our company over time\" when discussing the company's strategy for PC releases. Currently, the game only has single-player, and any news of any multiplayer modes or a successor to GTA Online is yet to be revealed.",
+      "wrapped_untrusted": "<untrusted_source_data source=\"mediawiki_grand_theft_auto_vi\">\nGrand Theft Auto VI (also known as Grand Theft Auto 6, GTA 6 or GTA VI) is the seventeenth and latest installment in the Grand Theft Auto series and the seventh title in the HD Universe. It was released on November 19, 2026, published by Rockstar Games. A PC release date has yet to be confirmed. During Take-Two Interactive's annual shareholder meeting on September 17, 2026, CEO Strauss Zelnick stated that \"the PC platform is becoming more and more important to our company over time\" when discussing the company's strategy for PC releases. Currently, the game only has single-player, and any news of any multiplayer modes or a successor to GTA Online is yet to be revealed.\n</untrusted_source_data>",
+      "content_hash": "60317d2983741457f085be78946802030f8d0c6e31c5f4ab04142576c572dc8c"
+    },
+    {
+      "id": "wiki_jason_duval",
+      "title": "Jason Duval",
+      "source_url": "https://gta.fandom.com/wiki/Jason_Duval",
+      "effective_date": "2026-11-24",
+      "clean_extract": "Jason Duval is one of the two protagonists, along with Lucia Caminos, and a playable character in . Jason has a son with Lucia named Tomás. Jason is also a native of the State of Leonida, who assists drug runners and does side jobs across the state. Living in a tropical stilt house in Key Lento, he decides to make an income with Lucia and other characters transitioning to the criminal underworld, hoping it will provide them a fulfilling lifestyle. He is an associate of Brian Heder and best friend of Cal Hampton. He is portrayed by Dylan Rourke.",
+      "wrapped_untrusted": "<untrusted_source_data source=\"mediawiki_jason_duval\">\nJason Duval is one of the two protagonists, along with Lucia Caminos, and a playable character in . Jason has a son with Lucia named Tomás. Jason is also a native of the State of Leonida, who assists drug runners and does side jobs across the state. Living in a tropical stilt house in Key Lento, he decides to make an income with Lucia and other characters transitioning to the criminal underworld, hoping it will provide them a fulfilling lifestyle. He is an associate of Brian Heder and best friend of Cal Hampton. He is portrayed by Dylan Rourke.\n</untrusted_source_data>",
+      "content_hash": "858a63e1ef7bea5583803cc0e6055e8da2afddf3042834ec4154024e2df14772"
+    },
+    {
+      "id": "wiki_leonida_keys",
+      "title": "Leonida Keys",
+      "source_url": "https://gta.fandom.com/wiki/Leonida_Keys",
+      "effective_date": "2026-11-24",
+      "clean_extract": "The Leonida Keys is an archipelago in southern Mariana County, Leonida, appearing in .",
+      "wrapped_untrusted": "<untrusted_source_data source=\"mediawiki_leonida_keys\">\nThe Leonida Keys is an archipelago in southern Mariana County, Leonida, appearing in .\n</untrusted_source_data>",
+      "content_hash": "f8a741d0b8bed6eb69627064875af93a462660cacb04c9f46fbcfbb39ef78dff"
+    },
+    {
+      "id": "wiki_lucia_caminos",
+      "title": "Lucia Caminos",
+      "source_url": "https://gta.fandom.com/wiki/Lucia_Caminos",
+      "effective_date": "2026-11-24",
+      "clean_extract": "Lucia Caminos is one of the two protagonists, along with Jason Duval, and a playable character in Grand Theft Auto VI. Lucia has a son with Jason named Tomás. Struggling to raise the money needed to raise and feed her child growing up, Lucia and Jason have turned to the criminal underworld amid financial hardship and AI taking jobs in the 2020s. At the age of 26, Lucia's desperate financial situation motivated her to rob a payday loan store, and she was sentenced to 3 years at Hamlet Correctional Facility. Luck got Lucia out of prison earlier, but she is not as reformed as the state believes. She is portrayed by Manni L. Perez.",
+      "wrapped_untrusted": "<untrusted_source_data source=\"mediawiki_lucia_caminos\">\nLucia Caminos is one of the two protagonists, along with Jason Duval, and a playable character in Grand Theft Auto VI. Lucia has a son with Jason named Tomás. Struggling to raise the money needed to raise and feed her child growing up, Lucia and Jason have turned to the criminal underworld amid financial hardship and AI taking jobs in the 2020s. At the age of 26, Lucia's desperate financial situation motivated her to rob a payday loan store, and she was sentenced to 3 years at Hamlet Correctional Facility. Luck got Lucia out of prison earlier, but she is not as reformed as the state believes. She is portrayed by Manni L. Perez.\n</untrusted_source_data>",
+      "content_hash": "341deb667b181650714926f96700bd300a5d7117eb30aedc37103e7c4de24fbf"
+    },
+    {
+      "id": "wiki_missions_in_grand_theft_auto_vi",
+      "title": "Missions in Grand Theft Auto VI",
+      "source_url": "https://gta.fandom.com/wiki/Missions_in_Grand_Theft_Auto_VI",
+      "effective_date": "2026-11-24",
+      "clean_extract": "The following is a list of missions featured in . The game's storyline follows Jason Duval and Lucia Caminos as they become involved in criminal activities throughout the State of Leonida. The main storyline is divided into five chapters, beginning with a prologue that introduces the protagonists and their relationship. Some missions can be completed in different orders, while others become available only after certain story events. This article lists the main storyline missions in their approximate order of progression.",
+      "wrapped_untrusted": "<untrusted_source_data source=\"mediawiki_missions_in_grand_theft_auto_vi\">\nThe following is a list of missions featured in . The game's storyline follows Jason Duval and Lucia Caminos as they become involved in criminal activities throughout the State of Leonida. The main storyline is divided into five chapters, beginning with a prologue that introduces the protagonists and their relationship. Some missions can be completed in different orders, while others become available only after certain story events. This article lists the main storyline missions in their approximate order of progression.\n</untrusted_source_data>",
+      "content_hash": "2af59dead46d02c1d6166054b503cb215903e708d37f30cfd01be53498017044"
+    },
+    {
+      "id": "wiki_radio_stations",
+      "title": "Radio Stations",
+      "source_url": "https://gta.fandom.com/wiki/Radio_Stations",
+      "effective_date": "2026-11-24",
+      "clean_extract": "A radio station is a broadcasting service that can be listened to in a vehicle or on a standalone radio player. They feature in every Grand Theft Auto game, and are accessible from almost any vehicle (except some such as bikes or emergency vehicles). Most radio stations play songs with a and commercials between them; other stations are primarily discussion-based. Emergency services channels are not considered radio stations. Emergency vehicles do not play public radio, except in multiplayer. Each radio station focuses on one theme or . Some PC versions have the functionality for Custom Radio Stations. Rockstar Games has with playlists for most radio stations from each GTA game, although some playlists are missing certain songs.",
+      "wrapped_untrusted": "<untrusted_source_data source=\"mediawiki_radio_stations\">\nA radio station is a broadcasting service that can be listened to in a vehicle or on a standalone radio player. They feature in every Grand Theft Auto game, and are accessible from almost any vehicle (except some such as bikes or emergency vehicles). Most radio stations play songs with a and commercials between them; other stations are primarily discussion-based. Emergency services channels are not considered radio stations. Emergency vehicles do not play public radio, except in multiplayer. Each radio station focuses on one theme or . Some PC versions have the functionality for Custom Radio Stations. Rockstar Games has with playlists for most radio stations from each GTA game, although some playlists are missing certain songs.\n</untrusted_source_data>",
+      "content_hash": "09606b6023ddb74aede3570d8573591fa2e5dda5288fed8abaa10aad06467ede"
+    },
+    {
+      "id": "wiki_radio_stations_in_gta_vi",
+      "title": "Radio Stations in GTA VI",
+      "source_url": "https://gta.fandom.com/wiki/Radio_Stations_in_GTA_VI",
+      "effective_date": "2026-11-24",
+      "clean_extract": "The radio stations in are a collection of music and talk stations broadcasting throughout the State of Leonida. The game features 22 regular radio stations, with a further two unlockable stations, The Vault Radio and The Sniper of La Perle. Music can also be heard through smartphones when travelling on foot.",
+      "wrapped_untrusted": "<untrusted_source_data source=\"mediawiki_radio_stations_in_gta_vi\">\nThe radio stations in are a collection of music and talk stations broadcasting throughout the State of Leonida. The game features 22 regular radio stations, with a further two unlockable stations, The Vault Radio and The Sniper of La Perle. Music can also be heard through smartphones when travelling on foot.\n</untrusted_source_data>",
+      "content_hash": "1208e82cd65910c1fa2c33e77eb6a3f3b0da999ff93cae0c2cfdaef94f5554ae"
+    },
+    {
+      "id": "wiki_state_of_leonida",
+      "title": "State of Leonida",
+      "source_url": "https://gta.fandom.com/wiki/State_of_Leonida",
+      "effective_date": "2026-11-24",
+      "clean_extract": "The State of Leonida (pronounced lay-oh-NYE-duh) is a state located in the United States of America, appearing in .",
+      "wrapped_untrusted": "<untrusted_source_data source=\"mediawiki_state_of_leonida\">\nThe State of Leonida (pronounced lay-oh-NYE-duh) is a state located in the United States of America, appearing in .\n</untrusted_source_data>",
+      "content_hash": "c60a548269bd217d5d53a289d088fd7919be597df4ac98ae76c696da008ccc6c"
+    },
+    {
+      "id": "wiki_vice_city_hd_universe",
+      "title": "Vice City (HD Universe)",
+      "source_url": "https://gta.fandom.com/wiki/Vice_City_(HD_Universe)",
+      "effective_date": "2026-11-24",
+      "clean_extract": "The City of Vice, commonly known as Vice City or simply Vice and often abbreviated as V.C., is a major city that appears in , located in Leonida. The city also serves as the county seat of Vice-Dale County.",
+      "wrapped_untrusted": "<untrusted_source_data source=\"mediawiki_vice_city_hd_universe\">\nThe City of Vice, commonly known as Vice City or simply Vice and often abbreviated as V.C., is a major city that appears in , located in Leonida. The city also serves as the county seat of Vice-Dale County.\n</untrusted_source_data>",
+      "content_hash": "02ab48db4b3ace8fa765849bc1454eb6de7c8c1325ab970dbed8e3e33d9fa044"
+    },
+    {
+      "id": "wiki_wanted_level_in_grand_theft_auto_vi",
+      "title": "Wanted Level in Grand Theft Auto VI",
+      "source_url": "https://gta.fandom.com/wiki/Wanted_Level_in_Grand_Theft_Auto_VI",
+      "effective_date": "2026-11-24",
+      "clean_extract": "escaping the Vice Beach Police Department in .]] The Wanted Level in is a system that determines how wanted the player, controlling Jason Duval or Lucia Caminos, is by the law enforcement. The six-star Wanted Level returns after Grand Theft Auto V used a five-star system. The six-star system was previously used in and Chinatown Wars.",
+      "wrapped_untrusted": "<untrusted_source_data source=\"mediawiki_wanted_level_in_grand_theft_auto_vi\">\nescaping the Vice Beach Police Department in .]] The Wanted Level in is a system that determines how wanted the player, controlling Jason Duval or Lucia Caminos, is by the law enforcement. The six-star Wanted Level returns after Grand Theft Auto V used a five-star system. The six-star system was previously used in and Chinatown Wars.\n</untrusted_source_data>",
+      "content_hash": "444eada834b20ea9b1df409c198e69e8373f13d854c61da6723305bdbefc7f00"
+    }
+  ]
 }

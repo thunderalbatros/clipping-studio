@@ -16,7 +16,6 @@ from typing import Any, Literal
 import numpy as np
 import onnx_asr
 import onnxruntime as ort
-import yaml
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw, ImageFont
 
@@ -559,10 +558,9 @@ def transcribe_run(run_dir: Path, audio_policy: AudioPolicy | None = None) -> Ru
     eff_policy: AudioPolicy = audio_policy or state.audio_policy or "strict_clean"
     state.audio_policy = eff_policy
 
-    auto_cleanup = True
-    if CHANNEL_PROFILE_PATH.exists():
-        cfg = yaml.safe_load(CHANNEL_PROFILE_PATH.read_text(encoding="utf-8")) or {}
-        auto_cleanup = bool(cfg.get("storage", {}).get("auto_cleanup_temp", True))
+    from src.settings import load_channel_profile
+
+    auto_cleanup = bool(load_channel_profile(CHANNEL_PROFILE_PATH).storage.auto_cleanup_temp)
 
     transcripts: list[AnnotatedTranscript] = []
     for cand in state.candidates:

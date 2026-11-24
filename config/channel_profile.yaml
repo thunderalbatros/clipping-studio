@@ -1,65 +1,41 @@
-# Clipping Studio — Channel Profile Declarativo (v1 Modo B-Lite GTA VI)
-# Cambiar este archivo escala a nuevos canales/nichos sin modificar codigo en src/.
+# Clipping Studio — Channel & Runtime Defaults (v4.0-B1, validated via pydantic-settings extra="forbid")
+# Zero dead keys: every field below is validated by src/settings.py and wired into runtime modules.
 
-channel:
-  id: "gta6_clips_en_v1"
-  language: "en"
-  target_market: "tier1_en" # US / UK / CA / AU
-  studio_mode: "streamer_gta6_lite"
+studio:
+  default_niche: "gaming_gta6"
+  default_language: "en"
   monetization_goal: "cpm_bounty" # cpm_bounty | ypp_bridge | editorial
-
-voice:
-  # Bounties CPM: "none" por defecto (no pisar reaccion original del streamer).
-  # YPP / Editorial: "human_batch" (Shure SM58 + Mackie Onyx) o "tts" (pocket-tts / VoxCPM2).
-  mode: "none"
-  cold_open_max_words: 12
-  cold_open_max_sec: 3.5
-  ducking_db: -18.0 # J-cut voice-over sobre accion ya en curso
+  voice_mode: "none" # none (Bounties CPM) | human_batch (Shure SM58) | tts
 
 clip_rules:
-  min_duration_sec: 20
-  target_duration_sec: 35
-  max_duration_sec: 58 # Para Multi-POV >60s usar perfil dedicado
-  min_self_contained_score: 75
+  min_duration_sec: 16.0
+  max_duration_sec: 58.0
   min_reviewer_score: 0.75
   max_review_retries: 1
-  dmca_strict_reject: true
-  cut_silence_over_sec: 0.45
-  preserve_synchresis_pause_sec: 0.25 # Micro-silencio previo a impacto/remate (Michel Chion)
+  cut_silence_over_sec: 0.65
+  preserve_synchresis_pause_sec: 0.25
 
 layout_9_16:
-  width: 1080
-  height: 1920
-  preserve_source_fps: true
   fps: 60
-  webcam_band_ratio: 0.36 # 36% webcam / 64% gameplay
-  webcam_position: "top"  # top | bottom
-  max_webcam_upscale: 1.8 # Regla fisica anti-upscale destructivo cuando webcam < 540px
+  preserve_source_fps: true
+  max_webcam_upscale: 1.8
   webcam_exclusion_pad_px: 48
   rms_punch_in_max_zoom: 1.15
-  safe_zones:
-    top_pct: 15
-    right_pct: 18
-    bottom_pct: 35
-    left_pct: 4
 
 captions:
-  engine: "libass"
   font_name: "Montserrat Black"
-  font_file: "assets/fonts/Montserrat-Black.ttf"
   font_size: 68
   uppercase: true
   max_words_per_chunk: 3
   max_chars_per_chunk: 16
-  primary_color: "&H00FFFFFF" # Blanco puro base
-  highlight_color: "&H0000FFFF" # Amarillo neon (BGR) palabra activa
-  impact_color: "&H0055FF00" # Verde neon (BGR) impacto / grito
-  outline_color: "&H00000000"
-  outline_width: 6
-  shadow: 3
+  primary_color: "&H00FFFFFF"
+  highlight_color: "&H0000FFFF"
+  impact_color: "&H0055FF00"
+  outline_width: 6.0
+  shadow: 3.0
   pos_x: 540
   pos_y: 1120
-  skip_npc_dialogue: true # LR-ASD Streamer-Only: omitir NPCs y dialogos del juego
+  skip_npc_dialogue: true
 
 audio:
   target_lufs: -14.0

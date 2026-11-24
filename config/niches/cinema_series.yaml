@@ -1,0 +1,39 @@
+niche_id: "cinema_series"
+display_name: "Cinema & Series Transformative Commentary"
+description: "Editorial film/series essays and visual breakdowns requiring strict commentary transformation against Content ID and YouTube Anti-Clipper."
+production_ready: false
+languages: ["en", "es"]
+target_platforms:
+  - "youtube_shorts"
+  - "tiktok"
+  - "instagram_reels"
+  - "x"
+  - "youtube_long"
+framing_mode: "cinematic_transformative"
+silence_trim_policy: "preserve_pauses"
+audio_pipeline:
+  use_bs_roformer: true
+  use_deepfilternet: true
+  preserve_crowd_laughter: false
+  default_audio_policy: "strict_clean"
+asr_engine_preference: "faster_whisper_l4"
+diarization_required: true
+copyright_guard: "strict_transformative_commentary"
+visual_presets:
+  badge_label: "FILM ESSAY"
+  accent_color: "#F59E0B"
+  caption_style: "editorial_clean"
+  motion_graphics_engine: "editorial_callout"
+  broll_or_diagram_mode: "commentary_pip"
+  allowed_scene_types: ["cutscene", "trailer_or_video_reaction"]
+  default_hashtags: ["#FilmAnalysis", "#Cinema", "#Shorts"]
+  qa_special_rules:
+    - "Mandatory transformative commentary/visual framing check (reject raw unedited film/TV scene uploads)."
+    - "BS-RoFormer musical score separation required before mixing commentary to prevent Content ID muting."
+min_qa_overall: 0.80
+rag_domains:
+  - "shortform_craft"
+  - "design_ctr"
+  - "bounties_dmca"
+  - "episodic_memory"
+lore_source: null

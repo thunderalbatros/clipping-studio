@@ -1,0 +1,38 @@
+niche_id: "talks_presentations"
+display_name: "Keynotes, Conferences & Technical Talks"
+description: "Keynote takeaways and educational presentations pairing speaker charisma with legible slide/chart framing."
+production_ready: false
+languages: ["en", "es"]
+target_platforms:
+  - "youtube_shorts"
+  - "tiktok"
+  - "instagram_reels"
+  - "x"
+  - "youtube_long"
+framing_mode: "presenter_and_slides"
+silence_trim_policy: "moderate"
+audio_pipeline:
+  use_bs_roformer: false
+  use_deepfilternet: true
+  preserve_crowd_laughter: false
+  default_audio_policy: "strict_clean"
+asr_engine_preference: "faster_whisper_l4"
+diarization_required: false
+copyright_guard: "standard_dmca"
+visual_presets:
+  badge_label: "KEYNOTE"
+  accent_color: "#38BDF8"
+  caption_style: "editorial_clean"
+  motion_graphics_engine: "editorial_callout"
+  broll_or_diagram_mode: "slides_pip"
+  allowed_scene_types: ["just_chatting"]
+  default_hashtags: ["#TechTalk", "#Keynote", "#Shorts"]
+  qa_special_rules:
+    - "Slide/diagram region and presenter face must both remain legible without overlapping captions."
+    - "Deliver one concrete framework or insight within 25-50s."
+min_qa_overall: 0.78
+rag_domains:
+  - "shortform_craft"
+  - "design_ctr"
+  - "episodic_memory"
+lore_source: null

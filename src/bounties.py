@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 import safehttpx
 from curl_cffi import requests as curl_requests
 from dotenv import load_dotenv
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from src.db import (
     DEFAULT_DB_PATH,
@@ -117,13 +118,20 @@ def validate_public_http_url(raw_url: str, *, resolve_dns: bool = True) -> tuple
 
 
 def fetch_public_url_safe(url: str, timeout: float = 12.0) -> str:
-    """Fetch a public campaign URL via `safehttpx` (blocks SSRF, DNS rebinding, and private redirects)."""
+    """Fetch a public campaign URL via `safehttpx` (blocks SSRF, DNS rebinding, and private redirects; timeout <= 20s)."""
+    eff_timeout = min(20.0, max(1.0, float(timeout)))
     ok, reason = validate_public_http_url(url, resolve_dns=True)
     if not ok:
         raise ValueError(f"SSRF guard blocked URL ({reason}): {url}")
 
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=4.0),
+        retry=retry_if_exception_type((OSError, TimeoutError)),
+    )
     async def _do_get() -> Any:
-        return await safehttpx.get(url, timeout=timeout, follow_redirects=True)
+        return await safehttpx.get(url, timeout=eff_timeout, follow_redirects=True)
 
     resp: Any
     try:
@@ -406,15 +414,25 @@ def _extract_metrics_from_text(text: str) -> tuple[float, float, int]:
     return cpm, burn, min_views
 
 
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=0.5, min=0.5, max=4.0),
+)
+def _post_with_retry(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: int = 15) -> Any:
+    eff_timeout = min(20, max(2, int(timeout)))
+    return curl_requests.post(url, headers=headers, json=payload, timeout=eff_timeout)
+
+
 def _serper_search(query: str, num: int = 5) -> list[dict[str, Any]]:
     api_key = (os.getenv("SERPER_API_KEY") or "").strip()
     if not api_key:
         return []
     try:
-        resp = curl_requests.post(
+        resp = _post_with_retry(
             "https://google.serper.dev/search",
             headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-            json={"q": query, "num": num},
+            payload={"q": query, "num": num},
             timeout=15,
         )
         if resp.status_code != 200:
@@ -432,11 +450,11 @@ def _firecrawl_scrape_markdown(url: str) -> str:
     if not api_key:
         return ""
     try:
-        resp = curl_requests.post(
+        resp = _post_with_retry(
             "https://api.firecrawl.dev/v1/scrape",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"url": url, "formats": ["markdown"], "onlyMainContent": True},
-            timeout=25,
+            payload={"url": url, "formats": ["markdown"], "onlyMainContent": True},
+            timeout=18,
         )
         if resp.status_code != 200:
             return ""
@@ -504,7 +522,7 @@ def import_bounty_hitl(
         geo_requirement=geo_clean,
         platforms=platforms,
     )
-    cid = campaign_id or f"{platform.strip().lower()}_{hashlib.sha1(url.strip().encode('utf-8')).hexdigest()[:10]}"
+    cid = campaign_id or f"{platform.strip().lower()}_{hashlib.sha1(url.strip().encode('utf-8'), usedforsecurity=False).hexdigest()[:10]}"
     upsert_res = upsert_campaign(
         campaign_id=cid,
         platform=platform.strip().lower(),
@@ -592,7 +610,7 @@ def scan_bounties(
                 burn_rate_pct=burn,
                 min_views=min_views,
             )
-            cid = f"{platform}_{hashlib.sha1(url.encode('utf-8')).hexdigest()[:10]}"
+            cid = f"{platform}_{hashlib.sha1(url.encode('utf-8'), usedforsecurity=False).hexdigest()[:10]}"
             upsert_res = upsert_campaign(
                 campaign_id=cid,
                 platform=platform,

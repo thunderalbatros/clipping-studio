@@ -10,9 +10,9 @@ permissions:
 
 jobs:
   static-and-unit-gate:
-    name: Ruff, ty Ratchet, Pytest & Gitleaks
+    name: Ruff, ty, Bandit, pip-audit, Pytest-Cov & Gitleaks
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
 
     steps:
       - name: Checkout repository
@@ -34,13 +34,15 @@ jobs:
           python-version: "3.12"
           enable-cache: true
 
-      - name: Install lightweight CI dependencies (zero VOD downloads)
+      - name: Install lightweight KS-4 CI dependencies (zero VOD/GPU downloads)
         run: |
           uv venv .venv --python 3.12
           uv pip install --python .venv/bin/python \
             "pydantic>=2.14.0" \
+            "pydantic-settings>=2.8.0" \
             "pyyaml>=6.0.4" \
             "python-dotenv>=1.2.0" \
+            "structlog>=25.1.0" \
             "numpy>=2.5.0" \
             "pillow>=13.0.0" \
             "psutil>=7.0.0" \
@@ -50,27 +52,36 @@ jobs:
             "safehttpx<=0.1.7" \
             "tenacity>=9.1.0" \
             "websockets>=17.4" \
-            "sqlite-vec>=0.1.6" \
+            "sqlite-vec==0.1.9" \
             "chonkie>=1.7.0" \
-            "fastembed>=0.9.0" \
+            "fastembed==0.9.1" \
             "qdrant-client>=1.16.0" \
             "ffmpeg-normalize>=1.45.0" \
             "onnxruntime==1.32.0" \
             "scenedetect>=0.6.7" \
             "opencv-python-headless>=4.11.0" \
-            "google-genai>=2.30.0,<3.0.0" \
-            "pydantic-ai-slim[google,groq]>=2.71.0" \
+            "google-genai>=2.30.0,<4.0.0" \
+            "pydantic-ai-slim[google,groq]==2.71.0" \
             "pydantic-evals>=2.71.0" \
             "openai>=3.57.0" \
+            "bandit>=1.8.0" \
+            "pip-audit>=2.8.0" \
             "pytest>=8.3.0" \
+            "pytest-cov>=6.0.0" \
             "ruff>=0.17.0" \
             "ty"
 
       - name: Ruff lint check
         run: .venv/bin/ruff check src/ evals/ tests/ scripts/
 
-      - name: ty static type check (global src/)
-        run: .venv/bin/ty check src/
+      - name: ty static type check (src/ + evals/)
+        run: .venv/bin/ty check src/ evals/
 
-      - name: Pytest unit test suite
-        run: .venv/bin/pytest tests/ -v
+      - name: Bandit SAST security scan (medium/high gate)
+        run: .venv/bin/bandit -r src/ evals/ scripts/ -ll
+
+      - name: pip-audit dependency vulnerability scan
+        run: .venv/bin/pip-audit --progress-spinner off
+
+      - name: Pytest unit test suite with coverage
+        run: .venv/bin/pytest tests/ -v --cov=src --cov=evals --cov-report=term-missing

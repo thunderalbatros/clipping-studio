@@ -1,0 +1,39 @@
+niche_id: "podcast_interview"
+display_name: "Podcasts & Multi-Speaker Interviews"
+description: "Conversational insights, debates, and emotional stories with speaker diarization and dynamic speaker tracking."
+production_ready: false
+languages: ["en", "es"]
+target_platforms:
+  - "youtube_shorts"
+  - "tiktok"
+  - "instagram_reels"
+  - "x"
+  - "youtube_long"
+framing_mode: "dynamic_speaker_track"
+silence_trim_policy: "moderate"
+audio_pipeline:
+  use_bs_roformer: false
+  use_deepfilternet: true
+  preserve_crowd_laughter: false
+  default_audio_policy: "strict_clean"
+asr_engine_preference: "faster_whisper_l4"
+diarization_required: true
+copyright_guard: "standard_dmca"
+visual_presets:
+  badge_label: "PODCAST"
+  accent_color: "#00E5FF"
+  caption_style: "editorial_clean"
+  motion_graphics_engine: "editorial_callout"
+  broll_or_diagram_mode: "none"
+  allowed_scene_types: ["just_chatting"]
+  default_hashtags: ["#Podcast", "#Clips", "#Shorts"]
+  qa_special_rules:
+    - "Active speaker face must remain centered inside 9:16 frame on speaker turns."
+    - "Zero orphaned pronouns in opening 0-3s; question/premise must be self-contained."
+min_qa_overall: 0.78
+rag_domains:
+  - "shortform_craft"
+  - "design_ctr"
+  - "bounties_dmca"
+  - "episodic_memory"
+lore_source: null

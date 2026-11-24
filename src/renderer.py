@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import yaml
 from ffmpeg_normalize import FFmpegNormalize
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
@@ -1053,21 +1052,27 @@ def render_master_clip(
     """Render Senior-grade v3.6-A 1080x1920 60fps CFR clip + pre-amix voice clarity + riser/sidechain + `ffmpeg-normalize`."""
     apply_thread_budget()
     ensure_media_path()
-    cfg: dict[str, Any] = {}
-    if CHANNEL_PROFILE_PATH.exists():
-        cfg = yaml.safe_load(CHANNEL_PROFILE_PATH.read_text(encoding="utf-8")) or {}
-    captions_cfg = cfg.get("captions") or {}
-    layout_cfg = cfg.get("layout_9_16") or {}
-    clip_cfg = cfg.get("clip_rules") or {}
-    audio_cfg = cfg.get("audio") or {}
-    auto_cleanup = bool((cfg.get("storage") or {}).get("auto_cleanup_temp", True))
+    from src.niche_packs import load_niche_pack, silence_policy_cut_threshold_sec
+    from src.settings import load_channel_profile
+
+    chan_prof = load_channel_profile(CHANNEL_PROFILE_PATH)
+    captions_cfg = chan_prof.captions.model_dump()
+    layout_cfg = chan_prof.layout_9_16.model_dump()
+    clip_cfg = chan_prof.clip_rules.model_dump()
+    audio_cfg = chan_prof.audio.model_dump()
+    auto_cleanup = bool(chan_prof.storage.auto_cleanup_temp)
 
     max_upscale = float(layout_cfg.get("max_webcam_upscale", 1.8))
     excl_pad = int(layout_cfg.get("webcam_exclusion_pad_px", 48))
     punch_zoom = min(1.15, max(1.10, float(layout_cfg.get("rms_punch_in_max_zoom", 1.12))))
     if scene_blueprint is not None and "zoom" in scene_blueprint.overlay_and_effects_guide.lower():
         punch_zoom = min(1.15, max(punch_zoom, 1.13))
-    cut_silence_sec = float(clip_cfg.get("cut_silence_over_sec", 0.65))
+    base_silence_sec = float(clip_cfg.get("cut_silence_over_sec", 0.65))
+    try:
+        active_pack = load_niche_pack(chan_prof.studio.default_niche)
+        cut_silence_sec = silence_policy_cut_threshold_sec(active_pack, default_sec=base_silence_sec)
+    except Exception:
+        cut_silence_sec = base_silence_sec
     synchresis_sec = float(clip_cfg.get("preserve_synchresis_pause_sec", 0.25))
 
     target_lufs = float(audio_cfg.get("target_lufs", -14.0))

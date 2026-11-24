@@ -507,19 +507,25 @@ def list_campaigns(
     db_path: Path = DEFAULT_DB_PATH,
 ) -> list[dict[str, Any]]:
     init_db(db_path)
-    order_clause = (
-        "ORDER BY CASE geo_requirement WHEN 'global' THEN 0 WHEN 'latam' THEN 1 ELSE 2 END ASC, cpm_usd DESC, updated_at DESC"
-        if geo_priority
-        else "ORDER BY updated_at DESC"
-    )
     with _connect(db_path) as conn:
-        if verdict:
+        if verdict and geo_priority:
             rows = conn.execute(
-                f"SELECT * FROM campaigns WHERE verdict = ? {order_clause}",
+                "SELECT * FROM campaigns WHERE verdict = ? "
+                "ORDER BY CASE geo_requirement WHEN 'global' THEN 0 WHEN 'latam' THEN 1 ELSE 2 END ASC, cpm_usd DESC, updated_at DESC",
                 (verdict,),
             ).fetchall()
+        elif verdict:
+            rows = conn.execute(
+                "SELECT * FROM campaigns WHERE verdict = ? ORDER BY updated_at DESC",
+                (verdict,),
+            ).fetchall()
+        elif geo_priority:
+            rows = conn.execute(
+                "SELECT * FROM campaigns "
+                "ORDER BY CASE geo_requirement WHEN 'global' THEN 0 WHEN 'latam' THEN 1 ELSE 2 END ASC, cpm_usd DESC, updated_at DESC"
+            ).fetchall()
         else:
-            rows = conn.execute(f"SELECT * FROM campaigns {order_clause}").fetchall()
+            rows = conn.execute("SELECT * FROM campaigns ORDER BY updated_at DESC").fetchall()
         return [dict(r) for r in rows]
 
 
@@ -785,17 +791,18 @@ def inspect_db_summary(db_path: Path = DEFAULT_DB_PATH) -> dict[str, Any]:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
             ).fetchall()
         ]
+        _summary_queries = {
+            "vods": "SELECT COUNT(*) FROM vods",
+            "slices": "SELECT COUNT(*) FROM slices",
+            "clips": "SELECT COUNT(*) FROM clips",
+            "telemetry": "SELECT COUNT(*) FROM telemetry",
+            "campaigns": "SELECT COUNT(*) FROM campaigns",
+            "transcripts_fts": "SELECT COUNT(*) FROM transcripts_fts",
+            "scene_blueprints": "SELECT COUNT(*) FROM scene_blueprints",
+            "creators": "SELECT COUNT(*) FROM creators",
+        }
         counts: dict[str, int] = {}
-        for t in (
-            "vods",
-            "slices",
-            "clips",
-            "telemetry",
-            "campaigns",
-            "transcripts_fts",
-            "scene_blueprints",
-            "creators",
-        ):
+        for t, sql_count in _summary_queries.items():
             if t in tables:
-                counts[t] = int(conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0])
+                counts[t] = int(conn.execute(sql_count).fetchone()[0])
         return {"db_path": str(db_path), "journal_mode": journal_mode, "tables": tables, "counts": counts}

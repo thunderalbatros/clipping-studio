@@ -15,13 +15,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import html as html_lib
+import http.client
 import json
 import shutil
 import socket
 import subprocess
 import tempfile
 import time
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -471,8 +471,13 @@ def _render_frames_via_chrome_cdp(
             if proc.poll() is not None:
                 return False, "browser_exited_early"
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=1.0) as resp:
-                    targets = json.loads(resp.read().decode("utf-8"))
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=1.0)
+                try:
+                    conn.request("GET", "/json/list")
+                    resp = conn.getresponse()
+                    targets = json.loads(resp.read().decode("utf-8")) if resp.status == 200 else []
+                finally:
+                    conn.close()
                 page_target = next((t for t in targets if t.get("type") == "page" and t.get("webSocketDebuggerUrl")), None)
                 if page_target:
                     ws_url = str(page_target["webSocketDebuggerUrl"])

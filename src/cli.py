@@ -23,6 +23,7 @@ from src.db import (
     upsert_clip,
     upsert_vod,
 )
+from src.logging_utils import correlation_scope, get_logger
 from src.miner import (
     PROJECT_ROOT,
     RUNS_DIR,
@@ -34,14 +35,17 @@ from src.miner import (
     probe_kick_channel,
     validate_run_id,
 )
+from src.niche_packs import DEFAULT_NICHE_ID, list_niche_pack_ids, load_niche_pack
 from src.renderer import render_ab_hook_variant, render_master_clip
 from src.resource_guard import heavy_local_allowed, unload_heavy_models
 from src.runtime_paths import resolve_binary
 from src.schemas import ClipPackaging, RunState, SceneBlueprint
+from src.settings import load_studio_settings
 from src.transcriber import transcribe_run
 from src.trends import run_trends_radar
 
 TELEMETRY_PATH = RUNS_DIR / "telemetry.jsonl"
+log = get_logger("cli")
 
 
 def _log_telemetry(run_id: str, event_type: str, event: dict[str, object]) -> None:
@@ -56,6 +60,9 @@ def _render_and_verify(
     state: RunState,
     ab_variants: int = 1,
     run_vlm_qa: bool = True,
+    *,
+    niche_id: str = DEFAULT_NICHE_ID,
+    language: str = "en",
 ) -> RunState:
     from evals.visual_qa import VisualQAInputs, evaluate_visual_qa
     from src.analytics import emit_hitl_kit_5_networks
@@ -63,7 +70,9 @@ def _render_and_verify(
     from src.design_engine import render_editorial_cover_9_16
     from src.notifier import send_clip_ready_alert
 
-    compute_profile = os.getenv("COMPUTE_PROFILE", "local_hp").strip() or "local_hp"
+    settings = load_studio_settings(niche_id=niche_id)
+    compute_profile = settings.active_compute_profile.profile_id
+    active_pack = settings.active_niche_pack
     cand_map = {c.slice_id: c for c in state.candidates}
     tr_map = {t.slice_id: t for t in state.transcripts}
     critic_map = {c.clip_id: c for c in state.critic_results}
@@ -71,189 +80,206 @@ def _render_and_verify(
     packages: list[ClipPackaging] = []
 
     for plan in state.edit_plans:
-        cand = cand_map[plan.slice_id]
-        tr = tr_map[plan.slice_id]
-        out_mp4 = run_dir / f"{plan.clip_id}_master_9_16.mp4"
-        cover_clean_pre_ass = run_dir / f"{plan.clip_id}_cover_clean.jpg"
-        cover_9_16 = run_dir / f"{plan.clip_id}_cover_9_16.jpg"
-        qa_dir = run_dir / f"{plan.clip_id}_qa_frames"
-        expected_fps: float | None = 60.0 if (cand.source_fps <= 0 or cand.source_fps >= 48.0) else 30.0
+        with correlation_scope(run_id=state.run_id, clip_id=plan.clip_id, niche_id=active_pack.niche_id):
+            cand = cand_map[plan.slice_id]
+            tr = tr_map[plan.slice_id]
+            out_mp4 = run_dir / f"{plan.clip_id}_master_9_16.mp4"
+            cover_clean_pre_ass = run_dir / f"{plan.clip_id}_cover_clean.jpg"
+            cover_9_16 = run_dir / f"{plan.clip_id}_cover_9_16.jpg"
+            qa_dir = run_dir / f"{plan.clip_id}_qa_frames"
+            expected_fps: float | None = 60.0 if (cand.source_fps <= 0 or cand.source_fps >= 48.0) else 30.0
 
-        bp_obj: SceneBlueprint | None = None
-        if plan.scene_blueprint_key:
-            cached_bp = get_scene_blueprint(plan.scene_blueprint_key)
-            if cached_bp is not None:
-                try:
-                    bp_obj = SceneBlueprint.model_validate_json(str(cached_bp["blueprint_json"]))
-                except Exception:
-                    bp_obj = None
+            bp_obj: SceneBlueprint | None = None
+            if plan.scene_blueprint_key:
+                cached_bp = get_scene_blueprint(plan.scene_blueprint_key)
+                if cached_bp is not None:
+                    try:
+                        bp_obj = SceneBlueprint.model_validate_json(str(cached_bp["blueprint_json"]))
+                    except Exception:
+                        bp_obj = None
 
-        pkg = generate_clip_packaging(plan, tr, state.streamer_id)
-        overlay_text = plan.freeze_frame.callout_text if plan.freeze_frame is not None else ""
-        forbidden_cover_texts = [overlay_text] if overlay_text else None
-
-        cover_rank_offset = 0
-        callout_y_override: int | None = None
-        qa_report: dict[str, object] = {}
-        verdict: dict[str, object] = {}
-
-        # Post-render autonomous Visual QA gate with max_retries=1 parametric adjustment
-        for attempt in range(2):
-            render_master_clip(
-                Path(cand.slice_video_path),
+            pkg = generate_clip_packaging(
                 plan,
                 tr,
-                out_mp4,
-                compute_profile=compute_profile,
-                clean_cover_out=cover_clean_pre_ass,
-                enforce_speaker_guard=(attempt == 0),
-                scene_blueprint=bp_obj,
-                cover_rank_offset=cover_rank_offset,
-                callout_y_override=callout_y_override,
+                state.streamer_id,
+                niche_id=active_pack.niche_id,
+                language=language,
             )
+            overlay_text = plan.freeze_frame.callout_text if plan.freeze_frame is not None else ""
+            forbidden_cover_texts = [overlay_text] if overlay_text else None
 
-            verdict = evaluate_video(out_mp4, qa_dir=qa_dir, expected_fps=expected_fps)
-            verdict["layout_audit"] = {
-                "layout_mode": plan.layout_mode,
-                "webcam_upscale_factor": plan.webcam_upscale_factor,
-                "no_webcam_gameplay_overlap": plan.no_webcam_gameplay_overlap,
-                "gameplay_crop_px": plan.gameplay_crop_px,
-                "source_width": cand.source_width,
-                "source_height": cand.source_height,
-                "source_fps": cand.source_fps,
-            }
-            (run_dir / f"{plan.clip_id}_media_check.json").write_text(json.dumps(verdict, indent=2), encoding="utf-8")
+            cover_rank_offset = 0
+            callout_y_override: int | None = None
+            qa_report: dict[str, object] = {}
+            verdict: dict[str, object] = {}
 
-            if out_mp4.is_file():
-                try:
-                    cover_headline = pkg.suggested_on_screen_hook or plan.hook_headline
-                    fallbacks = list(pkg.ab_hook_variants)
-                    # NEVER append overlay_text to fallbacks; pass forbidden_texts so cover != overlay!
-                    cover_source = cover_clean_pre_ass if cover_clean_pre_ass.is_file() else Path(cand.slice_video_path)
-                    cov_meta = render_editorial_cover_9_16(
-                        video_or_img=cover_source,
-                        headline=cover_headline,
-                        out_jpg=cover_9_16,
-                        clean_cover_jpg=cover_clean_pre_ass,
-                        title=pkg.shorts_title,
-                        fallback_headlines=fallbacks,
-                        forbidden_texts=forbidden_cover_texts,
-                    )
-                    pkg.suggested_on_screen_hook = str(cov_meta.get("cover_headline_used") or pkg.suggested_on_screen_hook)
-                    pkg.cover_timestamp_ms = int(cov_meta.get("cover_timestamp_ms") or 0)
-                    pkg.cover_clean_path = str(cov_meta.get("cover_clean_path") or "")
-                    pkg.cover_9_16_path = str(cov_meta.get("cover_path") or "")
-                except Exception as exc:
-                    print(f"[COVER_WARN] {plan.clip_id}: cover generation skipped ({exc})")
+            # Post-render autonomous Visual QA gate with max_retries=1 parametric adjustment
+            for attempt in range(2):
+                render_master_clip(
+                    Path(cand.slice_video_path),
+                    plan,
+                    tr,
+                    out_mp4,
+                    compute_profile=compute_profile,
+                    clean_cover_out=cover_clean_pre_ass,
+                    enforce_speaker_guard=(attempt == 0),
+                    scene_blueprint=bp_obj,
+                    cover_rank_offset=cover_rank_offset,
+                    callout_y_override=callout_y_override,
+                )
 
-            qa_report = evaluate_visual_qa(
-                VisualQAInputs(
-                    clip_id=plan.clip_id,
-                    video_path=out_mp4,
-                    cover_path=cover_9_16 if cover_9_16.is_file() else None,
-                    qa_dir=qa_dir,
-                    expected_fps=expected_fps,
+                verdict = evaluate_video(out_mp4, qa_dir=qa_dir, expected_fps=expected_fps)
+                verdict["layout_audit"] = {
+                    "layout_mode": plan.layout_mode,
+                    "webcam_upscale_factor": plan.webcam_upscale_factor,
+                    "no_webcam_gameplay_overlap": plan.no_webcam_gameplay_overlap,
+                    "gameplay_crop_px": plan.gameplay_crop_px,
+                    "source_width": cand.source_width,
+                    "source_height": cand.source_height,
+                    "source_fps": cand.source_fps,
+                }
+                (run_dir / f"{plan.clip_id}_media_check.json").write_text(json.dumps(verdict, indent=2), encoding="utf-8")
+
+                if out_mp4.is_file():
+                    try:
+                        cover_headline = pkg.suggested_on_screen_hook or plan.hook_headline
+                        fallbacks = list(pkg.ab_hook_variants)
+                        cover_source = cover_clean_pre_ass if cover_clean_pre_ass.is_file() else Path(cand.slice_video_path)
+                        cov_meta = render_editorial_cover_9_16(
+                            video_or_img=cover_source,
+                            headline=cover_headline,
+                            out_jpg=cover_9_16,
+                            clean_cover_jpg=cover_clean_pre_ass,
+                            title=pkg.shorts_title,
+                            badge_text=active_pack.visual_presets.badge_label,
+                            fallback_headlines=fallbacks,
+                            forbidden_texts=forbidden_cover_texts,
+                        )
+                        pkg.suggested_on_screen_hook = str(cov_meta.get("cover_headline_used") or pkg.suggested_on_screen_hook)
+                        pkg.cover_timestamp_ms = int(cov_meta.get("cover_timestamp_ms") or 0)
+                        pkg.cover_clean_path = str(cov_meta.get("cover_clean_path") or "")
+                        pkg.cover_9_16_path = str(cov_meta.get("cover_path") or "")
+                    except Exception as exc:
+                        log.warning("cover_generation_skipped", error=str(exc)[:180])
+
+                qa_report = evaluate_visual_qa(
+                    VisualQAInputs(
+                        clip_id=plan.clip_id,
+                        video_path=out_mp4,
+                        cover_path=cover_9_16 if cover_9_16.is_file() else None,
+                        qa_dir=qa_dir,
+                        expected_fps=expected_fps,
+                        shorts_title=pkg.shorts_title,
+                        cover_headline=pkg.suggested_on_screen_hook,
+                        overlay_callout_text=overlay_text,
+                        run_vlm=run_vlm_qa,
+                        niche_id=active_pack.niche_id,
+                        language=language,
+                    ),
+                    out_report_json=run_dir / f"{plan.clip_id}_visual_qa.json",
+                )
+                insert_telemetry(
+                    state.run_id,
+                    "visual_qa_verdict",
+                    {
+                        "clip_id": plan.clip_id,
+                        "niche_id": active_pack.niche_id,
+                        "attempt": attempt,
+                        "passed": qa_report.get("passed"),
+                        "status": qa_report.get("status"),
+                        "recommended_fix": qa_report.get("recommended_fix"),
+                        "scores": qa_report.get("scores"),
+                    },
+                )
+                if qa_report.get("status") == "READY_HITL":
+                    break
+                if attempt == 0:
+                    rec_fix = str(qa_report.get("recommended_fix") or "shift_cover_frame")
+                    log.info("visual_qa_parametric_retry", attempt=attempt, recommended_fix=rec_fix)
+                    if rec_fix == "shift_cover_frame":
+                        cover_rank_offset = 1
+                    elif rec_fix == "alternate_cover_hook":
+                        alt_cands = [h for h in pkg.ab_hook_variants if h.strip().upper() != pkg.suggested_on_screen_hook.strip().upper()]
+                        pkg.suggested_on_screen_hook = alt_cands[0] if alt_cands else "INSTANT KARMA"
+                    elif rec_fix == "shift_overlay_y":
+                        callout_y_override = OVERLAY_DEFAULT_Y + 48
+                    else:
+                        cover_rank_offset = 1
+
+            rendered.append(str(out_mp4))
+            checks_dict = verdict.get("checks") if isinstance(verdict.get("checks"), dict) else {}
+            loud_dict = checks_dict.get("loudness_ebur128") if isinstance(checks_dict, dict) else {}
+            lufs = float((loud_dict or {}).get("integrated_lufs") or 0.0)
+            dbtp = float((loud_dict or {}).get("true_peak_dbtp") or 0.0)
+
+            raw_status = str(qa_report.get("status") or "NEEDS_VISUAL_FIX")
+            qa_passed = raw_status == "READY_HITL" and bool(verdict.get("passed"))
+            clip_status = "READY_HITL" if qa_passed else (raw_status if raw_status == "PASS_TECHNICAL_ONLY" else "NEEDS_VISUAL_FIX")
+            pkg_json_str = ""
+
+            if qa_passed:
+                if ab_variants >= 2:
+                    alt_hook = (pkg.ab_hook_variants[0] if pkg.ab_hook_variants else pkg.suggested_on_screen_hook) or plan.hook_headline
+                    var_b_mp4 = run_dir / f"{plan.clip_id}_variant_b_9_16.mp4"
+                    try:
+                        render_ab_hook_variant(out_mp4, alt_hook, var_b_mp4, compute_profile=compute_profile)
+                        rendered.append(str(var_b_mp4))
+                    except Exception as exc:
+                        log.warning("ab_variant_skipped", error=str(exc)[:160])
+
+                packages.append(pkg)
+                pkg_json_str = pkg.model_dump_json(indent=2)
+                (run_dir / f"{plan.clip_id}_packaging.json").write_text(pkg_json_str, encoding="utf-8")
+                hitl_kit = emit_hitl_kit_5_networks(pkg, out_mp4, run_dir)
+                log.info(
+                    "packaging_emitted",
                     shorts_title=pkg.shorts_title,
-                    cover_headline=pkg.suggested_on_screen_hook,
-                    overlay_callout_text=overlay_text,
-                    run_vlm=run_vlm_qa,
-                ),
-                out_report_json=run_dir / f"{plan.clip_id}_visual_qa.json",
-            )
-            insert_telemetry(
-                state.run_id,
-                "visual_qa_verdict",
-                {
-                    "clip_id": plan.clip_id,
-                    "attempt": attempt,
-                    "passed": qa_report.get("passed"),
-                    "status": qa_report.get("status"),
-                    "recommended_fix": qa_report.get("recommended_fix"),
-                    "scores": qa_report.get("scores"),
-                },
-            )
-            if qa_report.get("passed"):
-                break
-            if attempt == 0:
-                rec_fix = str(qa_report.get("recommended_fix") or "shift_cover_frame")
-                print(f"[VISUAL_QA_RETRY] {plan.clip_id}: attempt=0 failed (fix={rec_fix}); applying parametric adjustment...")
-                if rec_fix == "shift_cover_frame":
-                    cover_rank_offset = 1
-                elif rec_fix == "alternate_cover_hook":
-                    alt_cands = [h for h in pkg.ab_hook_variants if h.strip().upper() != pkg.suggested_on_screen_hook.strip().upper()]
-                    pkg.suggested_on_screen_hook = alt_cands[0] if alt_cands else "INSTANT KARMA"
-                elif rec_fix == "shift_overlay_y":
-                    callout_y_override = OVERLAY_DEFAULT_Y + 48
-                else:
-                    cover_rank_offset = 1
+                    cover_hook=pkg.suggested_on_screen_hook,
+                    kit_path=hitl_kit["kit_md_path"],
+                )
+            else:
+                pkg_json_str = pkg.model_dump_json(indent=2)
+                (run_dir / f"{plan.clip_id}_packaging.json").write_text(pkg_json_str, encoding="utf-8")
 
-        rendered.append(str(out_mp4))
-        checks_dict = verdict.get("checks") if isinstance(verdict.get("checks"), dict) else {}
-        loud_dict = checks_dict.get("loudness_ebur128") if isinstance(checks_dict, dict) else {}
-        lufs = float((loud_dict or {}).get("integrated_lufs") or 0.0)
-        dbtp = float((loud_dict or {}).get("true_peak_dbtp") or 0.0)
-
-        qa_passed = bool(qa_report.get("passed")) and bool(verdict.get("passed"))
-        clip_status = "READY_HITL" if qa_passed else "NEEDS_VISUAL_FIX"
-        pkg_json_str = ""
-
-        if qa_passed:
-            if ab_variants >= 2:
-                alt_hook = (pkg.ab_hook_variants[0] if pkg.ab_hook_variants else pkg.suggested_on_screen_hook) or plan.hook_headline
-                var_b_mp4 = run_dir / f"{plan.clip_id}_variant_b_9_16.mp4"
-                try:
-                    render_ab_hook_variant(out_mp4, alt_hook, var_b_mp4, compute_profile=compute_profile)
-                    rendered.append(str(var_b_mp4))
-                except Exception as exc:
-                    print(f"[AB_VARIANT_WARN] {plan.clip_id}: Variant B skipped ({exc})")
-
-            packages.append(pkg)
-            pkg_json_str = pkg.model_dump_json(indent=2)
-            (run_dir / f"{plan.clip_id}_packaging.json").write_text(pkg_json_str, encoding="utf-8")
-            hitl_kit = emit_hitl_kit_5_networks(pkg, out_mp4, run_dir)
-            print(
-                f"[PACKAGING] {plan.clip_id}: title={pkg.shorts_title!r} cover_hook={pkg.suggested_on_screen_hook!r} "
-                f"tags={pkg.shorts_hashtags} cover_ts_ms={pkg.cover_timestamp_ms} kit={hitl_kit['kit_md_path']}"
-            )
-        else:
-            pkg_json_str = pkg.model_dump_json(indent=2)
-            (run_dir / f"{plan.clip_id}_packaging.json").write_text(pkg_json_str, encoding="utf-8")
-
-        cr = critic_map.get(plan.clip_id)
-        upsert_clip(
-            run_id=state.run_id,
-            clip_id=plan.clip_id,
-            slice_id=plan.slice_id,
-            source_url=plan.source_url,
-            streamer_id=state.streamer_id,
-            start_trim=plan.start_trim,
-            end_trim=plan.end_trim,
-            layout_mode=plan.layout_mode,
-            webcam_upscale_factor=plan.webcam_upscale_factor,
-            no_webcam_gameplay_overlap=plan.no_webcam_gameplay_overlap,
-            matched_lore_entity=plan.matched_lore_entity or "",
-            critic_overall=cr.overall if cr else 0.0,
-            media_check_passed=qa_passed,
-            lufs=lufs,
-            dbtp=dbtp,
-            output_mp4=str(out_mp4),
-            packaging_json=pkg_json_str,
-            status=clip_status,
-        )
-        print(
-            f"[VISUAL_QA_GATE] {out_mp4.name}: status={clip_status} qa_passed={qa_passed} "
-            f"lufs={lufs} dbtp={dbtp} upscale={plan.webcam_upscale_factor}x overlap_free={plan.no_webcam_gameplay_overlap}"
-        )
-
-        # Send HITL Telegram alert EXCLUSIVELY when clip passes autonomous Visual QA (`READY_HITL`)!
-        if clip_status == "READY_HITL":
-            send_clip_ready_alert(
+            cr = critic_map.get(plan.clip_id)
+            upsert_clip(
                 run_id=state.run_id,
                 clip_id=plan.clip_id,
-                mp4_path=out_mp4,
-                packaging=pkg.model_dump(),
+                slice_id=plan.slice_id,
+                source_url=plan.source_url,
+                streamer_id=state.streamer_id,
+                start_trim=plan.start_trim,
+                end_trim=plan.end_trim,
+                layout_mode=plan.layout_mode,
+                webcam_upscale_factor=plan.webcam_upscale_factor,
+                no_webcam_gameplay_overlap=plan.no_webcam_gameplay_overlap,
+                matched_lore_entity=plan.matched_lore_entity or "",
                 critic_overall=cr.overall if cr else 0.0,
+                media_check_passed=qa_passed,
+                lufs=lufs,
+                dbtp=dbtp,
+                output_mp4=str(out_mp4),
+                packaging_json=pkg_json_str,
+                status=clip_status,
             )
+            log.info(
+                "visual_qa_gate_result",
+                output_mp4=out_mp4.name,
+                status=clip_status,
+                qa_passed=qa_passed,
+                lufs=lufs,
+                dbtp=dbtp,
+            )
+
+            # Send HITL Telegram alert EXCLUSIVELY when clip passes autonomous Visual QA >= 0.78 (`READY_HITL`)!
+            if clip_status == "READY_HITL":
+                send_clip_ready_alert(
+                    run_id=state.run_id,
+                    clip_id=plan.clip_id,
+                    mp4_path=out_mp4,
+                    packaging=pkg.model_dump(),
+                    critic_overall=cr.overall if cr else 0.0,
+                )
 
     unload_heavy_models()
     state.rendered_clips = rendered
@@ -288,41 +314,55 @@ def cmd_run(args: argparse.Namespace) -> int:
         prev = RunState.model_validate_json(state_path.read_text(encoding="utf-8"))
         cur_stage = stage_order.get(prev.stage, 0)
 
-    if cur_stage < 1:
-        state = mine_vod_slices(
-            args.url,
-            streamer_id=args.streamer,
-            run_id=run_id,
-            top_k=args.top_k,
-            allow_short=args.allow_short,
-            allow_trailer=args.allow_trailer,
-            allow_720p=args.allow_720p,
-            allow_unlisted=args.allow_unlisted,
-        )
-    else:
-        state = RunState.model_validate_json(state_path.read_text(encoding="utf-8"))
+    niche_id = str(getattr(args, "niche", DEFAULT_NICHE_ID) or DEFAULT_NICHE_ID)
+    language = str(getattr(args, "lang", "en") or "en")
+    pack = load_niche_pack(niche_id)
+    eff_subject = str(getattr(args, "game", "") or (pack.lore_source.default_subject if pack.lore_source else pack.display_name))
 
-    if cur_stage < 2:
-        state = transcribe_run(run_dir, audio_policy=args.audio_policy)
-        unload_heavy_models()
+    with correlation_scope(run_id=run_id, niche_id=pack.niche_id):
+        if cur_stage < 1:
+            state = mine_vod_slices(
+                args.url,
+                streamer_id=args.streamer,
+                run_id=run_id,
+                top_k=args.top_k,
+                allow_short=args.allow_short,
+                allow_trailer=args.allow_trailer,
+                allow_720p=args.allow_720p,
+                allow_unlisted=args.allow_unlisted,
+            )
+        else:
+            state = RunState.model_validate_json(state_path.read_text(encoding="utf-8"))
 
-    if cur_stage < 3:
-        state = curate_run(
-            run_dir,
-            brief=args.brief,
-            audio_policy=args.audio_policy,
-            scene_research=bool(getattr(args, "scene_research", False)),
-            game=str(getattr(args, "game", "GTA VI") or "GTA VI"),
-            max_clips=args.top_k,
-        )
-        unload_heavy_models()
+        if cur_stage < 2:
+            state = transcribe_run(run_dir, audio_policy=args.audio_policy)
+            unload_heavy_models()
 
-    if cur_stage >= 5 and not args.fresh:
-        print(f"[CLI] run_id={run_id} already at stage='reviewed'; skipping re-render (pass --fresh to force).")
-    elif state.edit_plans:
-        state = _render_and_verify(run_dir, state, ab_variants=args.ab_variants)
-    else:
-        print(f"[CLI] run_id={run_id} finished without approved clips (check slice_audits/critic_results).")
+        if cur_stage < 3:
+            state = curate_run(
+                run_dir,
+                brief=args.brief,
+                audio_policy=args.audio_policy,
+                scene_research=bool(getattr(args, "scene_research", False)),
+                game=eff_subject,
+                max_clips=args.top_k,
+                niche_id=pack.niche_id,
+                language=language,
+            )
+            unload_heavy_models()
+
+        if cur_stage >= 5 and not args.fresh:
+            log.info("cli_run_already_reviewed", stage=state.stage)
+        elif state.edit_plans:
+            state = _render_and_verify(
+                run_dir,
+                state,
+                ab_variants=args.ab_variants,
+                niche_id=pack.niche_id,
+                language=language,
+            )
+        else:
+            log.info("cli_run_no_approved_clips", stage=state.stage)
 
     elapsed = round(time.perf_counter() - t0, 2)
     _log_telemetry(
@@ -351,20 +391,34 @@ def cmd_curate(args: argparse.Namespace) -> int:
         print(f"[RESOURCE_GUARD] Blocked local curate: {reason}")
         return 1
 
+    niche_id = str(getattr(args, "niche", DEFAULT_NICHE_ID) or DEFAULT_NICHE_ID)
+    language = str(getattr(args, "lang", "en") or "en")
+    pack = load_niche_pack(niche_id)
+    eff_subject = str(getattr(args, "game", "") or (pack.lore_source.default_subject if pack.lore_source else pack.display_name))
+
     run_dir = validate_run_id(args.run_id, RUNS_DIR)
-    if args.retranscribe:
-        transcribe_run(run_dir, audio_policy=args.audio_policy)
+    with correlation_scope(run_id=args.run_id, niche_id=pack.niche_id):
+        if args.retranscribe:
+            transcribe_run(run_dir, audio_policy=args.audio_policy)
+            unload_heavy_models()
+        state = curate_run(
+            run_dir,
+            brief=args.brief,
+            audio_policy=args.audio_policy,
+            scene_research=bool(getattr(args, "scene_research", False)),
+            game=eff_subject,
+            niche_id=pack.niche_id,
+            language=language,
+        )
         unload_heavy_models()
-    state = curate_run(
-        run_dir,
-        brief=args.brief,
-        audio_policy=args.audio_policy,
-        scene_research=bool(getattr(args, "scene_research", False)),
-        game=str(getattr(args, "game", "GTA VI") or "GTA VI"),
-    )
-    unload_heavy_models()
-    if args.render and state.edit_plans:
-        state = _render_and_verify(run_dir, state, ab_variants=args.ab_variants)
+        if args.render and state.edit_plans:
+            state = _render_and_verify(
+                run_dir,
+                state,
+                ab_variants=args.ab_variants,
+                niche_id=pack.niche_id,
+                language=language,
+            )
     print(f"[CLI_CURATE] run_id={args.run_id} audits={len(state.slice_audits)} plans={len(state.edit_plans)} audio_policy={state.audio_policy}")
     return 0
 
@@ -577,15 +631,38 @@ def cmd_analytics(args: argparse.Namespace) -> int:
 
 
 def cmd_rag(args: argparse.Namespace) -> int:
-    """Rebuild or query the hybrid local RAG (FTS5 + sqlite-vec + fastembed) & read-only Omni-RAG v6 bridge."""
-    from src.rag_engine import format_rag_context, query_rag, rebuild_rag_index
+    """Rebuild/query hybrid RAG, sync governed SSOT to Qdrant Cloud (`sync-cloud`), or run multi-hop agentic RAG."""
+    from src.qdrant_knowledge import inspect_empirical_collection, sync_empirical_cloud
+    from src.rag_engine import format_rag_context, query_rag, rag_query_agentic, rebuild_rag_index
 
     init_db()
     if args.rag_cmd == "rebuild":
         stats = rebuild_rag_index(skip_vectors=bool(args.no_vectors))
         print(json.dumps(stats, indent=2, ensure_ascii=False))
         return 0
+    if args.rag_cmd == "sync-cloud":
+        niche_filter = str(args.niche).strip().lower() if getattr(args, "niche", None) else None
+        cloud_stats = sync_empirical_cloud(filter_niche=niche_filter)
+        print(json.dumps(cloud_stats, indent=2, ensure_ascii=False))
+        return 0
+    if args.rag_cmd == "inspect-cloud":
+        info = inspect_empirical_collection()
+        print(json.dumps(info, indent=2, ensure_ascii=False))
+        return 0
     if args.rag_cmd == "query":
+        if bool(getattr(args, "agentic", False)):
+            ag_res = rag_query_agentic(
+                args.text,
+                niche=str(getattr(args, "niche", DEFAULT_NICHE_ID) or DEFAULT_NICHE_ID),
+                language=str(getattr(args, "lang", "en") or "en"),
+                domain=args.domain,
+                allow_federated=bool(args.federated),
+                max_hops=int(getattr(args, "max_hops", 2)),
+                top_k=args.top_k,
+                max_tokens=args.max_tokens,
+            )
+            print(json.dumps(ag_res, indent=2, ensure_ascii=False))
+            return 0
         hits = query_rag(
             args.text,
             domain=args.domain,
@@ -602,6 +679,27 @@ def cmd_rag(args: argparse.Namespace) -> int:
             "formatted_context": format_rag_context(hits, max_tokens=args.max_tokens),
         }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    return 1
+
+
+def cmd_context(args: argparse.Namespace) -> int:
+    """Synchronize live external lore/context (`cli context sync --niche ...` or alias `cli lore sync --game ...`)."""
+    from src.context_sync import sync_niche_context
+
+    if args.context_cmd == "sync":
+        niche_id = str(getattr(args, "niche", DEFAULT_NICHE_ID) or DEFAULT_NICHE_ID).strip().lower()
+        subj = str(getattr(args, "game", "") or "").strip() or None
+        rep = sync_niche_context(
+            niche_id=niche_id,
+            subject_override=subj,
+            sync_cloud=not bool(getattr(args, "no_cloud", False)),
+        )
+        print(json.dumps(rep, indent=2, ensure_ascii=False))
+        return 0
+    if args.context_cmd == "niches":
+        packs = {nid: load_niche_pack(nid).model_dump() for nid in list_niche_pack_ids()}
+        print(json.dumps({"count": len(packs), "niches": packs}, indent=2, ensure_ascii=False))
         return 0
     return 1
 
@@ -673,17 +771,8 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     daily_usd = get_daily_llm_spend_usd()
     daily_cap = float(os.getenv("LLM_DAILY_BUDGET_USD", "2.50") or 2.50)
 
-    env_keys = (
-        "GCP_PROJECT_ID",
-        "GROQ_API_KEY",
-        "OPENROUTER_API_KEY",
-        "YOUTUBE_API_KEY",
-        "SERPER_API_KEY",
-        "FIRECRAWL_API_KEY",
-        "TELEGRAM_BOT_TOKEN",
-        "TELEGRAM_CHAT_ID",
-    )
-    env_status = {k: ("PRESENTE" if os.getenv(k, "").strip() else "FALTANTE") for k in env_keys}
+    settings = load_studio_settings()
+    env_status = settings.env.secret_presence_report()
 
     deno_exe = find_deno_executable()
     deno_found = deno_exe is not None
@@ -713,8 +802,11 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     }
     report = {
         "hardware": snap,
+        "compute_profile": settings.active_compute_profile.model_dump(),
+        "active_niche": settings.active_niche_pack.niche_id,
+        "available_niches": list_niche_pack_ids(),
         "heavy_local_allowed": {"allowed": allowed, "reason": reason},
-        "storage": {"runs_mb": runs_mb, "quota_mb": 4096.0},
+        "storage": {"runs_mb": runs_mb, "quota_mb": round(settings.channel_profile.storage.runs_max_gb * 1024.0, 1)},
         "llm_budget_utc_day": {"spent_usd": daily_usd, "cap_usd": daily_cap},
         "onnxruntime_version": ort.__version__,
         "sqlite": db_info,
@@ -728,15 +820,17 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Clipping Studio Orchestrator CLI (v3.1)")
+    parser = argparse.ArgumentParser(description="Clipping Studio Universal Multi-Niche Orchestrator CLI (v4.0-B1)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_run = sub.add_parser("run", help="Execute resumable end-to-end 1080p pipeline")
     p_run.add_argument("--url", required=True)
     p_run.add_argument("--streamer", default="xqc")
+    p_run.add_argument("--niche", default=DEFAULT_NICHE_ID, help="Declarative NichePack ID (default: gaming_gta6)")
+    p_run.add_argument("--lang", choices=["en", "es", "auto"], default="en", help="Target clip/packaging language")
     p_run.add_argument("--run-id", default=None)
     p_run.add_argument("--top-k", type=int, default=2)
-    p_run.add_argument("--brief", default=None, help="Optional campaign brief matched against gta6_lore_index.json")
+    p_run.add_argument("--brief", default=None, help="Optional campaign brief matched against active niche lore index")
     p_run.add_argument(
         "--audio-policy",
         choices=["strict_clean", "sound_campaign", "keep_original"],
@@ -745,7 +839,7 @@ def main() -> int:
     )
     p_run.add_argument("--ab-variants", type=int, default=1, help="Set to 2 to also render Variant B (IG Trial Reels)")
     p_run.add_argument("--scene-research", action="store_true", help="Run Scene-Match Intelligence before Pass-2 editing")
-    p_run.add_argument("--game", default="GTA VI", help="Game/niche context for Scene-Match Intelligence")
+    p_run.add_argument("--game", default="", help="Optional subject/game override for Scene-Match Intelligence")
     p_run.add_argument("--allow-short", action="store_true")
     p_run.add_argument("--allow-trailer", action="store_true")
     p_run.add_argument("--allow-720p", action="store_true")
@@ -756,6 +850,8 @@ def main() -> int:
 
     p_cur = sub.add_parser("curate", help="Re-run transcriber/curator/render on an existing run")
     p_cur.add_argument("--run-id", required=True)
+    p_cur.add_argument("--niche", default=DEFAULT_NICHE_ID, help="Declarative NichePack ID (default: gaming_gta6)")
+    p_cur.add_argument("--lang", choices=["en", "es", "auto"], default="en", help="Target clip/packaging language")
     p_cur.add_argument("--brief", default=None)
     p_cur.add_argument(
         "--audio-policy",
@@ -764,7 +860,7 @@ def main() -> int:
     )
     p_cur.add_argument("--ab-variants", type=int, default=1)
     p_cur.add_argument("--scene-research", action="store_true")
-    p_cur.add_argument("--game", default="GTA VI")
+    p_cur.add_argument("--game", default="")
     p_cur.add_argument("--retranscribe", action="store_true")
     p_cur.add_argument("--render", action="store_true")
     p_cur.set_defaults(func=cmd_curate)
@@ -867,18 +963,39 @@ def main() -> int:
     an_sub.add_parser("summary", help="Summarize multi-network performance -> context/performance_feedback.json")
     p_an.set_defaults(func=cmd_analytics)
 
-    p_rag = sub.add_parser("rag", help="Rebuild or query hybrid local RAG (FTS5+sqlite-vec) & read-only Omni-RAG v6")
+    p_rag = sub.add_parser("rag", help="Manage Qdrant Cloud SSOT (`sync-cloud`), local hybrid RAG, and Multi-Hop Agentic RAG")
     rag_sub = p_rag.add_subparsers(dest="rag_cmd", required=True)
-    rag_reb = rag_sub.add_parser("rebuild", help="Index all 6 knowledge gaps + episodic memory into runs/studio.db")
+    rag_reb = rag_sub.add_parser("rebuild", help="Index canonical bibles, 7 skills & episodic memory into runs/studio.db")
     rag_reb.add_argument("--no-vectors", action="store_true", help="Rebuild FTS5 only without computing embeddings")
-    rag_q = rag_sub.add_parser("query", help="Run hybrid BM25+vec RRF query (optionally federated to Omni-RAG v6)")
+    rag_sc = rag_sub.add_parser("sync-cloud", help="Idempotently sync governed 2026 docs, NichePacks, creators & lore to Qdrant Cloud")
+    rag_sc.add_argument("--niche", default=None, help="Optional single niche filter (syncs all niches + global if omitted)")
+    rag_sub.add_parser("inspect-cloud", help="Inspect exact point counts in Qdrant Cloud `clipping_studio_empirical`")
+    rag_q = rag_sub.add_parser("query", help="Run hybrid or Multi-Hop Agentic RAG query (`--agentic --niche ... --lang ...`)")
     rag_q.add_argument("text", help="Natural-language search query")
-    rag_q.add_argument("--domain", default=None, help="Filter local domain (design_ctr, gta6_streamers, episodic_memory, ...)")
+    rag_q.add_argument("--niche", default=DEFAULT_NICHE_ID, help="Active NichePack ID (default: gaming_gta6)")
+    rag_q.add_argument("--lang", choices=["en", "es", "auto"], default="en", help="Query language filter")
+    rag_q.add_argument("--domain", default=None, help="Filter domain (shortform_craft, design_ctr, bounties_dmca, ...)")
     rag_q.add_argument("--top-k", type=int, default=5)
     rag_q.add_argument("--federated", action="store_true", help="Also query Omni-RAG v6 strictly in ?mode=ro&immutable=1")
+    rag_q.add_argument("--agentic", action="store_true", help="Use Qdrant Cloud SSOT + multi-hop automatic query rewrite")
+    rag_q.add_argument("--max-hops", type=int, default=2, help="Max hops for agentic query rewrite (default: 2)")
     rag_q.add_argument("--bm25-only", action="store_true", help="Skip vector query leg")
     rag_q.add_argument("--max-tokens", type=int, default=550)
     p_rag.set_defaults(func=cmd_rag)
+
+    p_ctx = sub.add_parser(
+        "context",
+        aliases=["lore"],
+        help="Synchronize live external lore/context (`context sync --niche gaming_gta6` / `lore sync --game 'GTA VI'`)",
+    )
+    ctx_sub = p_ctx.add_subparsers(dest="context_cmd", required=True)
+    ctx_sync = ctx_sub.add_parser("sync", help="Fetch live MediaWiki/context updates, save SSOT JSON, and sync to Qdrant Cloud")
+    ctx_sync.add_argument("--niche", default=DEFAULT_NICHE_ID, help="Target NichePack ID (default: gaming_gta6)")
+    ctx_sync.add_argument("--lang", choices=["en", "es", "auto"], default="en")
+    ctx_sync.add_argument("--game", default="", help="Optional game/subject override (e.g. 'GTA VI')")
+    ctx_sync.add_argument("--no-cloud", action="store_true", help="Update local JSON only without Qdrant Cloud upsert")
+    ctx_sub.add_parser("niches", help="List and validate all declarative `config/niches/*.yaml` NichePacks")
+    p_ctx.set_defaults(func=cmd_context)
 
     p_res = sub.add_parser("research", help="Scene-Match Intelligence: research viral references for an exact scene")
     p_res.add_argument("--query", default="", help="Exact scene/mission description (e.g. 'Destroy Donnie car gas can explosion')")
